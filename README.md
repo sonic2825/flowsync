@@ -68,6 +68,70 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 
 打开浏览器访问：`http://127.0.0.1:3030`
 
+## 命令详解
+
+以下命令均使用 `remote:path` 定位数据源和目标（例如 `local:docs`、`s3prod:bucket/prefix`）。
+
+### `copy`
+
+- 作用：把源文件复制到目标；只会新增/覆盖目标，不会删除目标中多余文件
+- 适合：一次性拷贝、增量补齐、低风险同步
+- 示例：
+
+```bash
+cargo run -- copy local:/data/src s3prod:bucket/prefix
+```
+
+### `sync`
+
+- 作用：让目标“镜像”源；会复制新增/变更文件，也会删除目标中源端不存在的文件
+- 适合：双端严格一致场景
+- 风险：会删除目标文件，建议先 `--dry-run`
+- 示例：
+
+```bash
+cargo run -- --dry-run sync local:/data/src s3prod:bucket/prefix
+```
+
+### `move`
+
+- 作用：先复制，再删除源端对应文件（等价“搬运”）
+- 适合：归档迁移、落盘后清理源目录
+- 风险：源文件会被删除，建议先用 `copy` 或 `--dry-run` 验证
+- 示例：
+
+```bash
+cargo run -- move local:/data/src s3prod:bucket/prefix
+```
+
+### `ls`
+
+- 作用：列出指定位置下的文件/目录信息（用于连通性和路径验证）
+- 适合：正式同步前确认 remote 配置、路径是否正确
+- 示例：
+
+```bash
+cargo run -- ls s3prod:bucket/prefix
+```
+
+### `config init`
+
+- 作用：交互式初始化本地配置文件（默认 `~/.config/rust-s3-sync/config.toml`）
+- 适合：首次使用时快速生成 remotes 配置
+- 说明：Web 端也可管理 remotes；执行任务时优先读取数据库中的 remotes
+- 示例：
+
+```bash
+cargo run -- config init
+```
+
+### 选择建议
+
+- 想“只增不删”：用 `copy`
+- 想“目标完全对齐源”：用 `sync`
+- 想“搬走并清理源”：用 `move`
+- 想“先检查路径与权限”：先跑 `ls` + `--dry-run`
+
 ## 全局参数说明
 
 以下参数适用于 `copy` / `sync` / `move`（`--log-level` 为全局参数）：
