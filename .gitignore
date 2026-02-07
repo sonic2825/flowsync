@@ -1,0 +1,6 @@
+/target
+/.tmp
+/.idea
+/.vscode
+.DS_Store
+transfer_failures.log
