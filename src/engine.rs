@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -83,26 +84,43 @@ pub async fn run_transfer(
         .cloned()
         .map(|f| (f.rel_path.clone(), f))
         .collect();
+    let target_map = Arc::new(target_map);
 
-    let mut copy_actions = Vec::new();
-    for src in &source_files {
-        let decision = should_copy(
-            src,
-            target_map.get(&src.rel_path),
-            &source_op,
-            &source.path,
-            &target_op,
-            &target.path,
-            &options,
-        )
+    let copy_actions: Vec<Action> = stream::iter(source_files.iter().cloned())
+        .map(|src| {
+            let source_op = source_op.clone();
+            let target_op = target_op.clone();
+            let source_path = source.path.clone();
+            let target_path = target.path.clone();
+            let target_map = Arc::clone(&target_map);
+            let options = options.clone();
+
+            async move {
+                let decision = should_copy(
+                    &src,
+                    target_map.get(&src.rel_path),
+                    &source_op,
+                    &source_path,
+                    &target_op,
+                    &target_path,
+                    &options,
+                )
+                .await?;
+
+                Ok::<Option<Action>, anyhow::Error>(if decision {
+                    Some(Action {
+                        rel_path: src.rel_path,
+                        size: src.size,
+                    })
+                } else {
+                    None
+                })
+            }
+        })
+        .buffer_unordered(options.checkers.max(1))
+        .try_filter_map(|action| async move { Ok(action) })
+        .try_collect()
         .await?;
-        if decision {
-            copy_actions.push(Action {
-                rel_path: src.rel_path.clone(),
-                size: src.size,
-            });
-        }
-    }
 
     let mut delete_actions = Vec::new();
     if matches!(mode, SyncMode::Sync) {

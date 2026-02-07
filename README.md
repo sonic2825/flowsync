@@ -12,7 +12,7 @@
   - `--ignore-existing` 跳过目标已存在文件
 - 并发：
   - `--transfers` 控制并发传输
-  - `--checkers` 参数已预留
+  - `--checkers` 控制差异检查并发（尤其在 `--checksum` 时）
 - 可观测性：
   - `indicatif` 总进度条
   - `--log-level` 日志级别
@@ -58,6 +58,60 @@ cargo run -- move local:/data/src s3prod:bucket/prefix
 
 ```bash
 cargo run -- ls s3prod:bucket/prefix
+```
+
+## 全局参数说明
+
+以下参数适用于 `copy` / `sync` / `move`（`--log-level` 为全局参数）：
+
+| 参数 | 默认值 | 说明 |
+|---|---:|---|
+| `--log-level <LEVEL>` | `info` | 日志级别（如 `trace`/`debug`/`info`/`warn`/`error`） |
+| `--transfers <N>` | `4` | 传输并发数（实际复制/写入并发） |
+| `--checkers <N>` | `8` | 差异检查并发数（决定是否需要复制的检查阶段） |
+| `--dry-run` | `false` | 仅打印计划动作，不执行写入/删除 |
+| `--include <GLOB>` | 空 | 仅包含匹配的相对路径，可重复传入 |
+| `--exclude <GLOB>` | 空 | 排除匹配的相对路径，可重复传入 |
+| `--bandwidth-limit <RATE>` | 不限速 | 限速，支持 `KB/MB/GB`（如 `50MB`） |
+| `--checksum` | `false` | 使用 SHA256 比较源/目标内容（更准确，通常更慢） |
+| `--ignore-existing` | `false` | 目标存在即跳过，不再比较内容 |
+
+### 对比规则（是否复制）
+
+- 默认：按 `size + mtime` 判断。
+- 开启 `--checksum`：按 SHA256 判断（会额外读取源与目标文件）。
+- 开启 `--ignore-existing`：目标存在即跳过，优先于内容比较。
+
+## 参数使用示例
+
+1) 高并发复制（网络和目标端可承受时）：
+
+```bash
+cargo run -- --transfers 32 --checkers 32 copy local:/data/src s3prod:bucket/prefix
+```
+
+2) 只看计划，不真正执行：
+
+```bash
+cargo run -- --dry-run sync local:/data/src s3prod:bucket/prefix
+```
+
+3) 用 checksum 做严格增量同步：
+
+```bash
+cargo run -- --checksum --checkers 16 sync local:/data/src s3prod:bucket/prefix
+```
+
+4) 限速同步（避免占满链路）：
+
+```bash
+cargo run -- --transfers 16 --bandwidth-limit 100MB sync local:/data/src s3prod:bucket/prefix
+```
+
+5) 只同步指定目录并排除临时文件：
+
+```bash
+cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync local:/data/src s3prod:bucket/prefix
 ```
 
 ## MinIO 端到端测试
