@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -34,6 +35,44 @@ pub struct SyncOptions {
 }
 
 #[derive(Debug, Clone)]
+pub enum TransferEvent {
+    Planned {
+        copy_count: usize,
+        delete_count: usize,
+        total_size: u64,
+    },
+    Copied {
+        rel_path: String,
+        size: u64,
+        completed_bytes: u64,
+        total_bytes: u64,
+    },
+    CopyFailed {
+        rel_path: String,
+        error: String,
+    },
+    Deleted {
+        rel_path: String,
+    },
+    DeleteFailed {
+        rel_path: String,
+        error: String,
+    },
+    MoveSourceDeleted {
+        rel_path: String,
+    },
+    MoveSourceDeleteFailed {
+        rel_path: String,
+        error: String,
+    },
+    Finished {
+        failures: usize,
+    },
+}
+
+pub type ProgressReporter = Arc<dyn Fn(TransferEvent) + Send + Sync>;
+
+#[derive(Debug, Clone)]
 pub struct FileEntry {
     pub rel_path: String,
     pub size: u64,
@@ -64,6 +103,18 @@ pub async fn run_transfer(
     target_op: Operator,
     target: Location,
     options: SyncOptions,
+) -> Result<()> {
+    run_transfer_with_reporter(mode, source_op, source, target_op, target, options, None).await
+}
+
+pub async fn run_transfer_with_reporter(
+    mode: SyncMode,
+    source_op: Operator,
+    source: Location,
+    target_op: Operator,
+    target: Location,
+    options: SyncOptions,
+    reporter: Option<ProgressReporter>,
 ) -> Result<()> {
     let filter = build_filter(&options.include, &options.exclude)?;
 
@@ -138,6 +189,14 @@ pub async fn run_transfer(
         delete_count = delete_actions.len(),
         "planned actions"
     );
+    emit(
+        &reporter,
+        TransferEvent::Planned {
+            copy_count: copy_actions.len(),
+            delete_count: delete_actions.len(),
+            total_size,
+        },
+    );
 
     if options.dry_run {
         for action in &copy_actions {
@@ -158,6 +217,7 @@ pub async fn run_transfer(
     );
 
     let failures = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let copied_bytes = Arc::new(AtomicU64::new(0));
 
     stream::iter(copy_actions.clone())
         .for_each_concurrent(options.transfers.max(1), |action| {
@@ -168,6 +228,9 @@ pub async fn run_transfer(
             let failures = failures.clone();
             let pb = pb.clone();
             let bw = options.bandwidth_limit;
+            let reporter = reporter.clone();
+            let copied_bytes = copied_bytes.clone();
+            let total_size = total_size;
 
             async move {
                 if let Err(err) =
@@ -178,8 +241,25 @@ pub async fn run_transfer(
                         .lock()
                         .await
                         .push(format!("{}: {}", action.rel_path, err));
+                    emit(
+                        &reporter,
+                        TransferEvent::CopyFailed {
+                            rel_path: action.rel_path.clone(),
+                            error: err.to_string(),
+                        },
+                    );
                 } else {
                     pb.inc(action.size);
+                    let completed = copied_bytes.fetch_add(action.size, Ordering::Relaxed) + action.size;
+                    emit(
+                        &reporter,
+                        TransferEvent::Copied {
+                            rel_path: action.rel_path.clone(),
+                            size: action.size,
+                            completed_bytes: completed,
+                            total_bytes: total_size,
+                        },
+                    );
                 }
             }
         })
@@ -195,6 +275,20 @@ pub async fn run_transfer(
                 .lock()
                 .await
                 .push(format!("delete {}: {}", rel_path, err));
+            emit(
+                &reporter,
+                TransferEvent::DeleteFailed {
+                    rel_path: rel_path.clone(),
+                    error: err.to_string(),
+                },
+            );
+        } else {
+            emit(
+                &reporter,
+                TransferEvent::Deleted {
+                    rel_path: rel_path.clone(),
+                },
+            );
         }
     }
 
@@ -208,11 +302,31 @@ pub async fn run_transfer(
                     .lock()
                     .await
                     .push(format!("move delete {}: {}", action.rel_path, err));
+                emit(
+                    &reporter,
+                    TransferEvent::MoveSourceDeleteFailed {
+                        rel_path: action.rel_path.clone(),
+                        error: err.to_string(),
+                    },
+                );
+            } else {
+                emit(
+                    &reporter,
+                    TransferEvent::MoveSourceDeleted {
+                        rel_path: action.rel_path.clone(),
+                    },
+                );
             }
         }
     }
 
     let failures = failures.lock().await;
+    emit(
+        &reporter,
+        TransferEvent::Finished {
+            failures: failures.len(),
+        },
+    );
     if !failures.is_empty() {
         let report = failures.join("\n");
         tokio::fs::write("transfer_failures.log", report)
@@ -225,6 +339,12 @@ pub async fn run_transfer(
     }
 
     Ok(())
+}
+
+fn emit(reporter: &Option<ProgressReporter>, event: TransferEvent) {
+    if let Some(reporter) = reporter {
+        reporter(event);
+    }
 }
 
 fn build_filter(include: &[String], exclude: &[String]) -> Result<Filter> {

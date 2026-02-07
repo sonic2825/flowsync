@@ -45,6 +45,7 @@ pub enum Commands {
     Move(TransferArgs),
     Ls(ListArgs),
     Config(ConfigArgs),
+    Server(ServerArgs),
 }
 
 #[derive(Debug, Args)]
@@ -62,6 +63,18 @@ pub struct ListArgs {
 pub struct ConfigArgs {
     #[command(subcommand)]
     pub action: ConfigAction,
+}
+
+#[derive(Debug, Args)]
+pub struct ServerArgs {
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    #[arg(long, default_value_t = 3030)]
+    pub port: u16,
+
+    #[arg(long, default_value = "rust_s3_sync.db")]
+    pub db: String,
 }
 
 #[derive(Debug, Subcommand)]

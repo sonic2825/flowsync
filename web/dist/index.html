@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>rust-s3-sync 管理后台</title>
+  <style>
+    :root {
+      --bg: #eff3f8;
+      --card: #ffffff;
+      --text: #1b2430;
+      --muted: #5f6b7b;
+      --line: #d7dde6;
+      --line-soft: #e8edf4;
+      --brand: #1e66ff;
+      --brand-strong: #1452d8;
+      --danger: #c9302c;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "PingFang SC", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      background:
+        radial-gradient(circle at 0% 0%, rgba(30, 102, 255, 0.1), transparent 35%),
+        radial-gradient(circle at 100% 100%, rgba(22, 163, 74, 0.07), transparent 30%),
+        var(--bg);
+      color: var(--text);
+    }
+    .app-shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+    h1, h2, h3 { margin: 0; }
+    .headline { margin-bottom: 18px; }
+    .subtle { color: var(--muted); font-size: 14px; margin-top: 6px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .card {
+      background: var(--card);
+      padding: 16px;
+      border-radius: var(--radius);
+      box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+    }
+    .value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    .section { margin-bottom: 18px; }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      border: 0;
+      background: var(--brand);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background .15s ease;
+      font-size: 14px;
+    }
+    .btn:hover { background: var(--brand-strong); }
+    .btn.secondary { background: #4f5d75; }
+    .btn.danger { background: var(--danger); }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: #fff;
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 760px; }
+    th, td { text-align: left; padding: 10px; border-bottom: 1px solid var(--line-soft); font-size: 14px; }
+    th { background: #f6f8fb; }
+    input, select, textarea {
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      width: 100%;
+      font-size: 14px;
+      background: #fff;
+      color: var(--text);
+    }
+    textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    .row { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+    .task-form { display: grid; gap: 12px; }
+    .form-block {
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      padding: 12px;
+      background: linear-gradient(180deg, #fbfdff 0%, #fff 100%);
+    }
+    .form-block h3 {
+      font-size: 14px;
+      margin-bottom: 10px;
+      color: #344256;
+      font-weight: 700;
+    }
+    .check-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 6px 10px;
+    }
+    .check-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 15px;
+    }
+    .check-item input[type="checkbox"] { width: 16px; height: 16px; }
+    .log-box {
+      background: #111827;
+      color: #d7fbd6;
+      padding: 12px;
+      border-radius: 8px;
+      height: 220px;
+      overflow: auto;
+      font-family: ui-monospace, Menlo, monospace;
+      font-size: 12px;
+    }
+    .hidden { display: none; }
+    .modal-backdrop.hidden { display: none; }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(12, 18, 32, 0.45);
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      animation: fadeIn .12s ease-out;
+    }
+    .modal {
+      width: min(960px, 100%);
+      max-height: calc(100vh - 32px);
+      overflow-y: auto;
+      animation: popIn .12s ease-out;
+    }
+    .modal-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .modal-open { overflow: hidden; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes popIn { from { transform: translateY(6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  </style>
+</head>
+<body>
+  <div class="app-shell">
+    <div class="headline">
+      <h1>rust-s3-sync Web 管理后台</h1>
+      <div class="subtle">任务管理、Remotes 配置与运行审计</div>
+    </div>
+
+    <div class="section">
+      <h2 style="margin-bottom:12px;">仪表盘</h2>
+      <div class="grid">
+        <div class="card"><div>运行中任务</div><div class="value" id="runningTasks">0</div></div>
+        <div class="card"><div>今日传输流量</div><div class="value" id="todayBytes">0 B</div></div>
+        <div class="card"><div>今日执行次数</div><div class="value" id="todayRuns">0</div></div>
+        <div class="card"><div>CPU / 内存</div><div class="value" id="systemUsage">0% / 0 B</div></div>
+      </div>
+    </div>
+
+    <div class="section card">
+      <div class="section-head">
+        <h2>后端存储配置（Remotes）</h2>
+        <button class="btn" id="openRemoteModalBtn" type="button">新建 / 编辑 Remote</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>名称</th><th>类型</th><th>配置</th><th>操作</th></tr>
+          </thead>
+          <tbody id="remotesBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-head">
+        <h2>任务列表</h2>
+        <button class="btn" id="openTaskModalBtn" type="button">创建任务</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>名称</th><th>模式</th><th>源</th><th>目标</th><th>Cron</th><th>启用</th><th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="tasksBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2 style="margin-bottom:12px;">实时事件 (WebSocket)</h2>
+      <div class="log-box" id="events"></div>
+    </div>
+
+    <div class="section">
+      <h2 style="margin-bottom:12px;">审计日志</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Run ID</th><th>Task ID</th><th>状态</th><th>触发方式</th><th>开始</th><th>结束</th><th>成功文件</th><th>失败文件</th><th>传输字节</th>
+            </tr>
+          </thead>
+          <tbody id="runsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="remoteModalBackdrop" class="modal-backdrop hidden">
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="remoteModalTitle">
+      <div class="modal-head">
+        <h2 id="remoteModalTitle">配置 Remote</h2>
+        <button class="btn secondary" id="closeRemoteModalBtn" type="button">关闭</button>
+      </div>
+      <form id="remoteForm">
+        <div class="row">
+          <input id="remoteName" placeholder="remote 名称（如 local / s3prod）" required />
+          <select id="remoteType">
+            <option value="fs">fs</option>
+            <option value="s3">s3</option>
+            <option value="sftp">sftp</option>
+            <option value="ftp">ftp</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <textarea id="remoteConfigJson" rows="7" placeholder='config_json（JSON对象，不含type字段）
+示例(fs): {"root": "/"}
+示例(s3): {"bucket":"my-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","url_style":"path","root":""}' required></textarea>
+        </div>
+        <div style="margin-top:12px;">
+          <button class="btn" type="submit">保存 Remote</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="taskModalBackdrop" class="modal-backdrop hidden">
+    <div class="modal card" role="dialog" aria-modal="true" aria-labelledby="taskModalTitle">
+      <div class="modal-head">
+        <h2 id="taskModalTitle">创建任务</h2>
+        <button class="btn secondary" id="closeTaskModalBtn" type="button">关闭</button>
+      </div>
+      <form id="taskForm" class="task-form">
+        <div class="form-block">
+          <h3>基础信息</h3>
+          <div class="row">
+            <input id="name" placeholder="任务名称" required />
+            <select id="mode">
+              <option value="sync">sync</option>
+              <option value="copy">copy</option>
+              <option value="move">move</option>
+            </select>
+            <input id="cron" placeholder="Cron (可选，如 0 */10 * * * *)" />
+          </div>
+        </div>
+        <div class="form-block">
+          <h3>数据路径</h3>
+          <div class="row">
+            <input id="source" placeholder="source (如 local:/data/src)" required />
+            <input id="destination" placeholder="destination (如 s3prod:bucket/prefix)" required />
+          </div>
+        </div>
+        <div class="form-block">
+          <h3>执行参数</h3>
+          <div class="row">
+            <input id="transfers" type="number" min="1" value="4" placeholder="transfers" />
+            <input id="checkers" type="number" min="1" value="8" placeholder="checkers" />
+            <input id="bandwidth" placeholder="限速 (可选，如 100MB)" />
+          </div>
+          <div class="check-row" style="margin-top:10px;">
+            <label class="check-item"><input id="checksum" type="checkbox" /> checksum</label>
+            <label class="check-item"><input id="ignoreExisting" type="checkbox" /> ignore-existing</label>
+            <label class="check-item"><input id="dryRun" type="checkbox" /> dry-run</label>
+            <label class="check-item"><input id="enabled" type="checkbox" checked /> 启用调度</label>
+          </div>
+        </div>
+        <div>
+          <button class="btn" type="submit">创建任务</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+    const fmtBytes = (n) => {
+      const units = ['B','KB','MB','GB','TB']; let i = 0; let x = Number(n || 0);
+      while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
+      return `${x.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+    };
+    const eventBox = byId('events');
+    const remoteModalBackdrop = byId('remoteModalBackdrop');
+    const taskModalBackdrop = byId('taskModalBackdrop');
+
+    async function api(path, init) {
+      const res = await fetch(path, init);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `HTTP ${res.status}`);
+      }
+      if (res.status === 204) return null;
+      return res.json();
+    }
+
+    function logEvent(obj) {
+      const line = `[${new Date().toLocaleTimeString()}] ${JSON.stringify(obj)}`;
+      eventBox.textContent += line + '\n';
+      eventBox.scrollTop = eventBox.scrollHeight;
+    }
+
+    function renderTasks(tasks) {
+      byId('tasksBody').innerHTML = tasks.map(t => `
+        <tr>
+          <td>${t.id}</td>
+          <td>${t.name}</td>
+          <td>${t.mode}</td>
+          <td>${t.source}</td>
+          <td>${t.destination}</td>
+          <td>${t.cron_expr || ''}</td>
+          <td>${t.enabled ? '是' : '否'}</td>
+          <td>
+            <button class="btn" onclick="runTask(${t.id})">立即运行</button>
+            ${t.enabled ? `<button class="btn secondary" onclick="pauseTask(${t.id})">暂停</button>` : `<button class="btn secondary" onclick="resumeTask(${t.id})">恢复</button>`}
+            <button class="btn danger" onclick="deleteTask(${t.id})">删除</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function renderRemotes(remotes) {
+      byId('remotesBody').innerHTML = remotes.map(r => `
+        <tr>
+          <td>${r.name}</td>
+          <td>${r.type}</td>
+          <td><pre style="margin:0;white-space:pre-wrap;max-width:700px;">${JSON.stringify(r.config_json || {}, null, 2)}</pre></td>
+          <td>
+            <button class="btn secondary" onclick='fillRemoteForm("${encodeURIComponent(JSON.stringify({name: r.name, type: r.type, config_json: r.config_json || {}}))}")'>编辑</button>
+            <button class="btn danger" onclick='deleteRemote(${JSON.stringify(r.name)})'>删除</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function renderRuns(runs) {
+      byId('runsBody').innerHTML = runs.map(r => `
+        <tr>
+          <td>${r.id}</td>
+          <td>${r.task_id}</td>
+          <td>${r.status}</td>
+          <td>${r.trigger_type}</td>
+          <td>${r.started_at}</td>
+          <td>${r.ended_at || ''}</td>
+          <td>${r.copied_files}</td>
+          <td>${r.failed_files}</td>
+          <td>${fmtBytes(r.copied_bytes)}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function refreshTasks() {
+      renderTasks(await api('/api/tasks'));
+    }
+
+    async function refreshRemotes() {
+      renderRemotes(await api('/api/remotes'));
+    }
+
+    async function refreshRuns() {
+      renderRuns(await api('/api/runs?limit=50'));
+    }
+
+    async function refreshDashboard() {
+      const d = await api('/api/dashboard');
+      byId('runningTasks').textContent = d.running_tasks;
+      byId('todayBytes').textContent = fmtBytes(d.today_transferred_bytes);
+      byId('todayRuns').textContent = d.today_runs;
+      byId('systemUsage').textContent = `${(d.cpu_usage_percent || 0).toFixed(1)}% / ${fmtBytes(d.memory_used_bytes)} / ${fmtBytes(d.memory_total_bytes)}`;
+    }
+
+    async function runTask(id) {
+      await api(`/api/tasks/${id}/run`, { method: 'POST' });
+      await refreshDashboard();
+    }
+    async function pauseTask(id) {
+      await api(`/api/tasks/${id}/pause`, { method: 'POST' });
+      await refreshTasks();
+    }
+    async function resumeTask(id) {
+      await api(`/api/tasks/${id}/resume`, { method: 'POST' });
+      await refreshTasks();
+    }
+    async function deleteTask(id) {
+      if (!confirm(`确认删除任务 ${id} ?`)) return;
+      await api(`/api/tasks/${id}`, { method: 'DELETE' });
+      await refreshTasks();
+      await refreshRuns();
+    }
+    async function deleteRemote(name) {
+      if (!confirm(`确认删除 remote ${name} ?`)) return;
+      await api(`/api/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      await refreshRemotes();
+    }
+    function openRemoteModal() {
+      remoteModalBackdrop.classList.remove('hidden');
+      document.body.classList.add('modal-open');
+    }
+    function closeRemoteModal() {
+      remoteModalBackdrop.classList.add('hidden');
+      document.body.classList.remove('modal-open');
+    }
+    function openTaskModal() {
+      taskModalBackdrop.classList.remove('hidden');
+      document.body.classList.add('modal-open');
+    }
+    function closeTaskModal() {
+      taskModalBackdrop.classList.add('hidden');
+      document.body.classList.remove('modal-open');
+    }
+    function fillRemoteForm(payload) {
+      const data = JSON.parse(decodeURIComponent(payload));
+      byId('remoteName').value = data.name;
+      byId('remoteType').value = data.type;
+      byId('remoteConfigJson').value = JSON.stringify(data.config_json || {}, null, 2);
+      openRemoteModal();
+    }
+    window.runTask = runTask;
+    window.pauseTask = pauseTask;
+    window.resumeTask = resumeTask;
+    window.deleteTask = deleteTask;
+    window.deleteRemote = deleteRemote;
+    window.fillRemoteForm = fillRemoteForm;
+    window.openRemoteModal = openRemoteModal;
+    window.closeRemoteModal = closeRemoteModal;
+    window.openTaskModal = openTaskModal;
+    window.closeTaskModal = closeTaskModal;
+
+    byId('openRemoteModalBtn').addEventListener('click', () => {
+      byId('remoteForm').reset();
+      openRemoteModal();
+    });
+    byId('closeRemoteModalBtn').addEventListener('click', closeRemoteModal);
+    remoteModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === remoteModalBackdrop) closeRemoteModal();
+    });
+    byId('openTaskModalBtn').addEventListener('click', () => {
+      byId('taskForm').reset();
+      byId('transfers').value = 4;
+      byId('checkers').value = 8;
+      byId('enabled').checked = true;
+      openTaskModal();
+    });
+    byId('closeTaskModalBtn').addEventListener('click', closeTaskModal);
+    taskModalBackdrop.addEventListener('click', (e) => {
+      if (e.target === taskModalBackdrop) closeTaskModal();
+    });
+
+    byId('remoteForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = byId('remoteName').value.trim();
+      const type = byId('remoteType').value;
+      let configJson = {};
+      try {
+        configJson = JSON.parse(byId('remoteConfigJson').value || '{}');
+      } catch (err) {
+        alert(`config_json 不是合法 JSON: ${err}`);
+        return;
+      }
+      try {
+        await api(`/api/remotes/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type, config_json: configJson }),
+        });
+      } catch (_) {
+        await api('/api/remotes', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name, type, config_json: configJson }),
+        });
+      }
+      await refreshRemotes();
+      byId('source').placeholder = `${name}:/path/from`;
+      byId('destination').placeholder = `${name}:/path/to`;
+      closeRemoteModal();
+    });
+
+    byId('taskForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const payload = {
+        name: byId('name').value,
+        source: byId('source').value,
+        destination: byId('destination').value,
+        mode: byId('mode').value,
+        cron_expr: byId('cron').value || null,
+        enabled: byId('enabled').checked,
+        transfers: Number(byId('transfers').value || 4),
+        checkers: Number(byId('checkers').value || 8),
+        checksum: byId('checksum').checked,
+        ignore_existing: byId('ignoreExisting').checked,
+        dry_run: byId('dryRun').checked,
+        include: [],
+        exclude: [],
+        bandwidth_limit: byId('bandwidth').value || null
+      };
+      await api('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      e.target.reset();
+      byId('transfers').value = 4;
+      byId('checkers').value = 8;
+      byId('enabled').checked = true;
+      closeTaskModal();
+      await refreshTasks();
+    });
+
+    function connectWs() {
+      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${protocol}://${location.host}/ws`);
+      ws.onmessage = async (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          logEvent(payload);
+          if (payload.event === 'task_completed' || payload.event === 'task_started') {
+            await refreshRuns();
+            await refreshDashboard();
+          }
+        } catch {
+          logEvent({ raw: ev.data });
+        }
+      };
+      ws.onclose = () => setTimeout(connectWs, 1500);
+    }
+
+    async function boot() {
+      await refreshRemotes();
+      await refreshTasks();
+      await refreshRuns();
+      await refreshDashboard();
+      connectWs();
+      setInterval(refreshDashboard, 5000);
+      setInterval(refreshRuns, 8000);
+    }
+    boot().catch((e) => logEvent({ error: String(e) }));
+  </script>
+</body>
+</html>

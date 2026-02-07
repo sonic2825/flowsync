@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod engine;
 mod remote;
+mod server;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -10,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 use crate::cli::{Cli, Commands};
 use crate::engine::{list, parse_bandwidth_limit, run_transfer, SyncMode, SyncOptions};
 use crate::remote::Location;
+use crate::server::run_server;
 
 #[derive(Clone)]
 struct RuntimeOptions {
@@ -64,6 +66,7 @@ async fn main() -> Result<()> {
         Commands::Move(args) => {
             execute_transfer(SyncMode::Move, args.source, args.destination, &runtime).await
         }
+        Commands::Server(args) => run_server(args.host, args.port, args.db).await,
     }
 }
 
