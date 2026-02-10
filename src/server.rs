@@ -18,7 +18,12 @@ use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::{
+    broadcast,
+    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    Mutex,
+};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -43,6 +48,15 @@ pub struct EventCleanupPolicy {
     pub interval_secs: u64,
 }
 
+#[derive(Debug, Clone)]
+struct TaskEventWrite {
+    task_id: i64,
+    run_id: Option<i64>,
+    event_type: String,
+    payload: String,
+    created_at: String,
+}
+
 impl Db {
     fn new(path: PathBuf) -> Self {
         Self { path }
@@ -51,8 +65,13 @@ impl Db {
     fn open(&self) -> Result<Connection> {
         let conn = Connection::open(&self.path)
             .with_context(|| format!("failed to open sqlite db: {}", self.path.display()))?;
-        conn.execute("PRAGMA foreign_keys=ON", [])
-            .context("failed to enable sqlite foreign keys")?;
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;",
+        )
+        .context("failed to initialize sqlite pragmas")?;
         Ok(conn)
     }
 
@@ -491,25 +510,32 @@ impl Db {
         .context("insert run errors join error")?
     }
 
-    async fn insert_task_event(
-        &self,
-        task_id: i64,
-        run_id: Option<i64>,
-        event_type: String,
-        payload: String,
-        created_at: String,
-    ) -> Result<()> {
+    async fn insert_task_events_batch(&self, records: Vec<TaskEventWrite>) -> Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
         let db = self.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let conn = db.open()?;
-            conn.execute(
+            let mut conn = db.open()?;
+            let tx = conn.transaction()?;
+            let mut stmt = tx.prepare(
                 "INSERT INTO task_events (task_id,run_id,event_type,payload,created_at) VALUES (?1,?2,?3,?4,?5)",
-                params![task_id, run_id, event_type, payload, created_at],
             )?;
+            for rec in records {
+                stmt.execute(params![
+                    rec.task_id,
+                    rec.run_id,
+                    rec.event_type,
+                    rec.payload,
+                    rec.created_at
+                ])?;
+            }
+            drop(stmt);
+            tx.commit()?;
             Ok(())
         })
         .await
-        .context("insert task event join error")?
+        .context("insert task events batch join error")?
     }
 
     async fn list_task_events(&self, query: ListTaskEventsQuery) -> Result<Vec<TaskEventRecord>> {
@@ -517,6 +543,12 @@ impl Db {
         tokio::task::spawn_blocking(move || -> Result<Vec<TaskEventRecord>> {
             let conn = db.open()?;
             let limit = query.limit.unwrap_or(200).clamp(1, 2000) as i64;
+            let keyword = query
+                .keyword
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(|v| format!("%{}%", v));
             let mut out = Vec::new();
             if let Some(run_id) = query.run_id {
                 let mut stmt = conn.prepare(
@@ -531,14 +563,27 @@ impl Db {
                     out.push(TaskEventRecord::from_row(row)?);
                 }
             } else if let Some(task_id) = query.task_id {
-                let mut stmt = conn.prepare(
-                    "SELECT id,task_id,run_id,event_type,payload,created_at
-                     FROM task_events
-                     WHERE task_id=?1
-                     ORDER BY id DESC
-                     LIMIT ?2",
-                )?;
-                let mut rows = stmt.query(params![task_id, limit])?;
+                let (sql, args): (&str, Vec<rusqlite::types::Value>) = if let Some(kw) = keyword {
+                    (
+                        "SELECT id,task_id,run_id,event_type,payload,created_at
+                         FROM task_events
+                         WHERE task_id=?1 AND (payload LIKE ?2 OR event_type LIKE ?2)
+                         ORDER BY id DESC
+                         LIMIT ?3",
+                        vec![task_id.into(), kw.into(), limit.into()],
+                    )
+                } else {
+                    (
+                        "SELECT id,task_id,run_id,event_type,payload,created_at
+                         FROM task_events
+                         WHERE task_id=?1
+                         ORDER BY id DESC
+                         LIMIT ?2",
+                        vec![task_id.into(), limit.into()],
+                    )
+                };
+                let mut stmt = conn.prepare(sql)?;
+                let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
                 while let Some(row) = rows.next()? {
                     out.push(TaskEventRecord::from_row(row)?);
                 }
@@ -659,6 +704,7 @@ struct AppState {
     scheduled_jobs: Arc<Mutex<HashMap<i64, Uuid>>>,
     running_tasks: Arc<Mutex<HashSet<i64>>>,
     ws_tx: broadcast::Sender<String>,
+    event_tx: UnboundedSender<TaskEventWrite>,
     system: Arc<Mutex<System>>,
 }
 
@@ -879,11 +925,12 @@ struct ListRunsQuery {
     limit: Option<u32>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Deserialize, Clone)]
 struct ListTaskEventsQuery {
     task_id: Option<i64>,
     run_id: Option<i64>,
     limit: Option<u32>,
+    keyword: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -945,6 +992,7 @@ pub async fn run_server(
 
     let scheduler = JobScheduler::new().await.context("create scheduler failed")?;
     let (ws_tx, _) = broadcast::channel(1024);
+    let (event_tx, event_rx) = unbounded_channel::<TaskEventWrite>();
 
     let state = Arc::new(AppState {
         db: db.clone(),
@@ -952,12 +1000,15 @@ pub async fn run_server(
         scheduled_jobs: Arc::new(Mutex::new(HashMap::new())),
         running_tasks: Arc::new(Mutex::new(HashSet::new())),
         ws_tx,
+        event_tx,
         system: Arc::new(Mutex::new(System::new_with_specifics(
             RefreshKind::new()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything()),
         ))),
     });
+
+    tokio::spawn(task_event_writer_worker(db.clone(), event_rx));
 
     load_schedules(state.clone()).await?;
     state
@@ -1294,7 +1345,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
         "at": Utc::now().to_rfc3339(),
     });
     broadcast_json(&state.ws_tx, started_event.clone());
-    persist_task_event_async(state.db.clone(), task.id, Some(run_id), started_event);
+    persist_task_event(&state.event_tx, task.id, Some(run_id), started_event);
 
     let copied_files = Arc::new(AtomicU64::new(0));
     let failed_files = Arc::new(AtomicU64::new(0));
@@ -1303,7 +1354,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
     let error_records = Arc::new(std::sync::Mutex::new(Vec::<RunErrorRecord>::new()));
 
     let ws_tx = state.ws_tx.clone();
-    let db = state.db.clone();
+    let event_tx = state.event_tx.clone();
     let copied_files_ref = copied_files.clone();
     let failed_files_ref = failed_files.clone();
     let copied_bytes_ref = copied_bytes.clone();
@@ -1328,7 +1379,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::Copied {
             rel_path,
@@ -1338,6 +1389,17 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
         } => {
             copied_files_ref.fetch_add(1, Ordering::Relaxed);
             copied_bytes_ref.store(completed_bytes, Ordering::Relaxed);
+            let uploaded_event = json!({
+                "event": "task_file_uploaded",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "file_bytes": size,
+                "completed_bytes": completed_bytes,
+                "total_bytes": total_bytes,
+                "at": Utc::now().to_rfc3339(),
+            });
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), uploaded_event);
             let now_ms = now_unix_millis();
             let last_emit = last_progress_emit_ms_ref.load(Ordering::Relaxed);
             let should_emit = completed_bytes >= total_bytes || now_ms.saturating_sub(last_emit) >= 250;
@@ -1362,7 +1424,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::CopyFailed { rel_path, error } => {
             failed_files_ref.fetch_add(1, Ordering::Relaxed);
@@ -1382,7 +1444,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::DeleteFailed { rel_path, error } => {
             failed_files_ref.fetch_add(1, Ordering::Relaxed);
@@ -1402,7 +1464,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::MoveSourceDeleteFailed { rel_path, error } => {
             failed_files_ref.fetch_add(1, Ordering::Relaxed);
@@ -1422,7 +1484,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::Finished { failures } => {
             let event = json!({
@@ -1433,7 +1495,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::Deleted { rel_path } => {
             let event = json!({
@@ -1444,7 +1506,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
         TransferEvent::MoveSourceDeleted { rel_path } => {
             let event = json!({
@@ -1455,7 +1517,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&ws_tx, event.clone());
-            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
+            persist_task_event(&event_tx, task_id, Some(run_id_for_event), event);
         }
     });
 
@@ -1528,7 +1590,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&state.ws_tx, event.clone());
-            persist_task_event_async(state.db.clone(), task.id, Some(run_id), event);
+            persist_task_event(&state.event_tx, task.id, Some(run_id), event);
         }
         Err(err) => {
             state
@@ -1555,7 +1617,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 "at": Utc::now().to_rfc3339(),
             });
             broadcast_json(&state.ws_tx, event.clone());
-            persist_task_event_async(state.db.clone(), task.id, Some(run_id), event);
+            persist_task_event(&state.event_tx, task.id, Some(run_id), event);
         }
     }
 
@@ -1676,7 +1738,12 @@ fn broadcast_json(sender: &broadcast::Sender<String>, value: serde_json::Value) 
     let _ = sender.send(value.to_string());
 }
 
-fn persist_task_event_async(db: Db, task_id: i64, run_id: Option<i64>, value: serde_json::Value) {
+fn persist_task_event(
+    sender: &UnboundedSender<TaskEventWrite>,
+    task_id: i64,
+    run_id: Option<i64>,
+    value: serde_json::Value,
+) {
     let event_type = value
         .get("event")
         .and_then(|v| v.as_str())
@@ -1688,19 +1755,53 @@ fn persist_task_event_async(db: Db, task_id: i64, run_id: Option<i64>, value: se
         .unwrap_or_else(|| "")
         .to_string();
     let payload = value.to_string();
-    tokio::spawn(async move {
-        let at = if created_at.is_empty() {
+    let record = TaskEventWrite {
+        task_id,
+        run_id,
+        event_type,
+        payload,
+        created_at: if created_at.is_empty() {
             Utc::now().to_rfc3339()
         } else {
             created_at
-        };
-        if let Err(err) = db
-            .insert_task_event(task_id, run_id, event_type, payload, at)
-            .await
-        {
-            warn!(task_id = task_id, run_id = ?run_id, error = %err, "persist task event failed");
+        },
+    };
+    if sender.send(record).is_err() {
+        warn!(task_id = task_id, run_id = ?run_id, "persist task event dropped: writer channel closed");
+    }
+}
+
+async fn task_event_writer_worker(db: Db, mut rx: UnboundedReceiver<TaskEventWrite>) {
+    while let Some(first) = rx.recv().await {
+        let mut batch = vec![first];
+        while batch.len() < 500 {
+            match rx.try_recv() {
+                Ok(item) => batch.push(item),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => break,
+            }
         }
-    });
+
+        if let Err(err) = persist_task_event_batch_with_retry(&db, batch).await {
+            warn!(error = %err, "persist task event batch failed");
+        }
+    }
+}
+
+async fn persist_task_event_batch_with_retry(db: &Db, batch: Vec<TaskEventWrite>) -> Result<()> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for attempt in 1..=4 {
+        match db.insert_task_events_batch(batch.clone()).await {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                last_error = Some(err);
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("unknown task event persistence failure")))
 }
 
 fn bool_to_i64(value: bool) -> i64 {

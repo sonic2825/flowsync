@@ -92,10 +92,10 @@
     }
     .filter-popover {
       display: none;
-      position: absolute;
-      top: calc(100% + 6px);
+      position: fixed;
+      top: 0;
       left: 0;
-      z-index: 20;
+      z-index: 9998;
       width: 180px;
       padding: 8px;
       border: 1px solid var(--line);
@@ -151,7 +151,7 @@
       font-family: ui-monospace, Menlo, monospace;
       font-size: 12px;
     }
-    .task-row { cursor: pointer; }
+    .task-row { cursor: pointer; position: relative; }
     .task-row.active { background: #eef4ff; }
     .status-pill {
       display: inline-block;
@@ -164,6 +164,63 @@
     .status-success { color: #0f7a3d; background: #e8f8ef; }
     .status-failed { color: #b42318; background: #ffecec; }
     .status-idle, .status-paused { color: #475467; background: #eef1f5; }
+    .progress-wrap {
+      min-width: 180px;
+      max-width: 240px;
+    }
+    .progress-track {
+      width: 100%;
+      height: 8px;
+      border-radius: 999px;
+      background: #e9eef7;
+      overflow: hidden;
+      margin-bottom: 4px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #1e66ff 0%, #2f8bff 100%);
+      transition: width .18s ease;
+    }
+    .progress-text {
+      font-size: 12px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+    .actions-cell { position: relative; }
+    .action-trigger { min-width: 76px; }
+    .action-menu {
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 30;
+      display: none;
+      min-width: 140px;
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 8px 22px rgba(15, 23, 42, 0.16);
+      padding: 6px;
+    }
+    .action-menu.open { display: block; }
+    .action-menu button {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      text-align: left;
+      padding: 8px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .action-menu button:hover { background: #edf3ff; }
+    .action-menu button.danger { color: #b42318; }
+    .action-menu hr {
+      border: 0;
+      border-top: 1px solid var(--line-soft);
+      margin: 6px 0;
+    }
+    .action-menu-top { z-index: 9999; }
     .hidden { display: none; }
     .modal-backdrop.hidden { display: none; }
     .modal-backdrop {
@@ -262,6 +319,7 @@
                   </select>
                 </div>
               </th>
+              <th>进度</th>
               <th>操作</th>
             </tr>
           </thead>
@@ -273,6 +331,9 @@
     <div class="section">
       <h2 style="margin-bottom:8px;">任务实时事件</h2>
       <div class="subtle" id="taskEventHint">请先点击上方任务行查看该任务实时事件</div>
+      <div style="margin:8px 0;">
+        <input id="eventsKeyword" placeholder="搜索实时事件关键词（如文件名）" />
+      </div>
       <div class="log-box" id="events"></div>
     </div>
 
@@ -309,6 +370,20 @@
         </table>
       </div>
     </div>
+  </div>
+  <div class="action-menu action-menu-top" id="taskActionMenu" onclick="event.stopPropagation()">
+    <button id="taskActionRun" type="button">立即运行</button>
+    <button id="taskActionEdit" type="button">编辑</button>
+    <button id="taskActionDuplicate" type="button">复制</button>
+    <button id="taskActionToggle" type="button">暂停</button>
+    <hr />
+    <button class="danger" id="taskActionDelete" type="button">删除</button>
+  </div>
+  <div class="action-menu action-menu-top" id="remoteActionMenu" onclick="event.stopPropagation()">
+    <button id="remoteActionEdit" type="button">编辑</button>
+    <button id="remoteActionDuplicate" type="button">复制</button>
+    <hr />
+    <button class="danger" id="remoteActionDelete" type="button">删除</button>
   </div>
 
   <div id="remoteModalBackdrop" class="modal-backdrop hidden">
@@ -402,12 +477,21 @@
     const taskStatusFilter = byId('taskStatusFilter');
     const runsTaskIdFilter = byId('runsTaskIdFilter');
     const runsStatusFilter = byId('runsStatusFilter');
+    const eventsKeyword = byId('eventsKeyword');
+    const taskActionMenu = byId('taskActionMenu');
+    const remoteActionMenu = byId('remoteActionMenu');
     let selectedTaskId = null;
     let selectedTaskName = '';
+    let activeActionTaskId = null;
+    let activeActionRemoteName = null;
     let editingTaskId = null;
     let latestTasks = [];
+    let latestRemotes = [];
     let latestRuns = [];
+    const taskProgressMap = new Map();
     let loadingTaskEventsFor = null;
+    let taskEventLines = [];
+    let eventsSearchTimer = null;
 
     function closeAllFilterPopovers() {
       document.querySelectorAll('.filter-popover.open').forEach((el) => el.classList.remove('open'));
@@ -418,7 +502,78 @@
       if (!popover) return;
       const shouldOpen = !popover.classList.contains('open');
       closeAllFilterPopovers();
-      if (shouldOpen) popover.classList.add('open');
+      if (!shouldOpen) return;
+      popover.classList.add('open');
+      const trigger = event?.currentTarget || event?.target;
+      const rect = trigger?.getBoundingClientRect?.();
+      if (!rect) return;
+      const popoverWidth = popover.offsetWidth || 180;
+      const popoverHeight = popover.offsetHeight || 120;
+      let left = rect.left;
+      let top = rect.bottom + 6;
+      left = Math.max(8, Math.min(left, window.innerWidth - popoverWidth - 8));
+      if (top + popoverHeight > window.innerHeight - 8) {
+        top = Math.max(8, rect.top - popoverHeight - 6);
+      }
+      popover.style.left = `${left}px`;
+      popover.style.top = `${top}px`;
+    }
+    function closeAllTaskActionMenus() {
+      taskActionMenu.classList.remove('open');
+      activeActionTaskId = null;
+    }
+    function closeAllRemoteActionMenus() {
+      remoteActionMenu.classList.remove('open');
+      activeActionRemoteName = null;
+    }
+    function toggleTaskActionMenu(taskId, event) {
+      event?.stopPropagation();
+      const task = latestTasks.find((t) => t.id === taskId);
+      if (!task) return;
+      const wasSameTaskOpen = taskActionMenu.classList.contains('open') && activeActionTaskId === taskId;
+      closeAllTaskActionMenus();
+      closeAllRemoteActionMenus();
+      if (wasSameTaskOpen) return;
+      activeActionTaskId = taskId;
+      byId('taskActionToggle').textContent = task.enabled ? '暂停' : '恢复';
+      taskActionMenu.classList.add('open');
+      const trigger = event?.currentTarget || event?.target;
+      const rect = trigger?.getBoundingClientRect?.();
+      if (!rect) return;
+      const menuWidth = taskActionMenu.offsetWidth || 150;
+      const menuHeight = taskActionMenu.offsetHeight || 180;
+      let left = rect.right - menuWidth;
+      let top = rect.bottom + 6;
+      left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
+      if (top + menuHeight > window.innerHeight - 8) {
+        top = Math.max(8, rect.top - menuHeight - 6);
+      }
+      taskActionMenu.style.left = `${left}px`;
+      taskActionMenu.style.top = `${top}px`;
+    }
+    function toggleRemoteActionMenu(name, event) {
+      event?.stopPropagation();
+      const remote = latestRemotes.find((r) => r.name === name);
+      if (!remote) return;
+      const wasSameRemoteOpen = remoteActionMenu.classList.contains('open') && activeActionRemoteName === name;
+      closeAllRemoteActionMenus();
+      closeAllTaskActionMenus();
+      if (wasSameRemoteOpen) return;
+      activeActionRemoteName = name;
+      remoteActionMenu.classList.add('open');
+      const trigger = event?.currentTarget || event?.target;
+      const rect = trigger?.getBoundingClientRect?.();
+      if (!rect) return;
+      const menuWidth = remoteActionMenu.offsetWidth || 150;
+      const menuHeight = remoteActionMenu.offsetHeight || 140;
+      let left = rect.right - menuWidth;
+      let top = rect.bottom + 6;
+      left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
+      if (top + menuHeight > window.innerHeight - 8) {
+        top = Math.max(8, rect.top - menuHeight - 6);
+      }
+      remoteActionMenu.style.left = `${left}px`;
+      remoteActionMenu.style.top = `${top}px`;
     }
 
     async function api(path, init) {
@@ -452,29 +607,44 @@
       }
     }
 
+    function renderTaskEvents() {
+      const keyword = (eventsKeyword.value || '').trim().toLowerCase();
+      const lines = keyword
+        ? taskEventLines.filter((line) => line.toLowerCase().includes(keyword))
+        : taskEventLines;
+      eventBox.textContent = lines.join('\n');
+      if (lines.length > 0) eventBox.textContent += '\n';
+      eventBox.scrollTop = eventBox.scrollHeight;
+    }
+
     function appendTaskEvent(obj) {
       if (selectedTaskId == null) return;
       const line = `[${new Date().toLocaleTimeString()}] ${JSON.stringify(obj)}`;
-      eventBox.textContent += line + '\n';
-      eventBox.scrollTop = eventBox.scrollHeight;
+      taskEventLines.push(line);
+      renderTaskEvents();
     }
 
     async function loadTaskEventHistory(taskId) {
       loadingTaskEventsFor = taskId;
-      const events = await api(`/api/events?task_id=${taskId}&limit=300`);
+      const keyword = (eventsKeyword.value || '').trim();
+      const query = keyword
+        ? `/api/events?task_id=${taskId}&limit=2000&keyword=${encodeURIComponent(keyword)}`
+        : `/api/events?task_id=${taskId}&limit=2000`;
+      const events = await api(query);
       if (loadingTaskEventsFor !== taskId || selectedTaskId !== taskId) return;
-      eventBox.textContent = '';
+      taskEventLines = [];
       for (const record of events) {
         const payload = record.payload || { event: record.event_type };
         const line = `[${new Date(record.created_at || Date.now()).toLocaleTimeString()}] ${JSON.stringify(payload)}`;
-        eventBox.textContent += line + '\n';
+        taskEventLines.push(line);
       }
-      eventBox.scrollTop = eventBox.scrollHeight;
+      renderTaskEvents();
     }
 
     function selectTask(id, name) {
       if (selectedTaskId !== id) {
-        eventBox.textContent = '';
+        taskEventLines = [];
+        renderTaskEvents();
       }
       selectedTaskId = id;
       selectedTaskName = name;
@@ -483,7 +653,8 @@
         tr.classList.toggle('active', Number(tr.dataset.taskId) === id);
       });
       loadTaskEventHistory(id).catch((e) => {
-        eventBox.textContent = `[${new Date().toLocaleTimeString()}] 加载历史事件失败: ${String(e)}\n`;
+        taskEventLines = [`[${new Date().toLocaleTimeString()}] 加载历史事件失败: ${String(e)}`];
+        renderTaskEvents();
       });
     }
 
@@ -509,15 +680,56 @@
           <td>${t.cron_expr || ''}</td>
           <td>${t.enabled ? '是' : '否'}</td>
           <td><span class="status-pill ${statusClass(statusLabel(t.status, t.enabled))}">${statusLabel(t.status, t.enabled)}</span></td>
-          <td>
-            <button class="btn" onclick="event.stopPropagation();runTask(${t.id})">立即运行</button>
-            <button class="btn secondary" onclick='event.stopPropagation();fillTaskForm("${encodeURIComponent(JSON.stringify(t))}")'>编辑</button>
-            <button class="btn secondary" onclick='event.stopPropagation();duplicateTask("${encodeURIComponent(JSON.stringify(t))}")'>复制</button>
-            ${t.enabled ? `<button class="btn secondary" onclick="event.stopPropagation();pauseTask(${t.id})">暂停</button>` : `<button class="btn secondary" onclick="event.stopPropagation();resumeTask(${t.id})">恢复</button>`}
-            <button class="btn danger" onclick="event.stopPropagation();deleteTask(${t.id})">删除</button>
+          <td>${renderTaskProgressCell(t)}</td>
+          <td class="actions-cell">
+            <button class="btn secondary action-trigger" onclick="toggleTaskActionMenu(${t.id}, event)">操作 ▾</button>
           </td>
         </tr>
       `).join('');
+    }
+
+    function clampProgress(pct) {
+      const n = Number(pct);
+      if (!Number.isFinite(n)) return 0;
+      return Math.max(0, Math.min(100, n));
+    }
+
+    function setTaskProgress(taskId, patch) {
+      const existing = taskProgressMap.get(taskId) || {};
+      taskProgressMap.set(taskId, {
+        ...existing,
+        ...patch,
+        updated_at: Date.now(),
+      });
+    }
+
+    function getTaskProgressDisplay(task) {
+      const effectiveStatus = statusLabel(task.status, task.enabled);
+      const progress = taskProgressMap.get(task.id);
+      if (effectiveStatus === 'paused') {
+        return { pct: 0, text: '-' };
+      }
+      if (!progress) {
+        if (effectiveStatus === 'running') return { pct: 0, text: '0.0%' };
+        return { pct: 0, text: '-' };
+      }
+      const pct = clampProgress(progress.progress_pct);
+      const completed = Number(progress.completed_bytes || 0);
+      const total = Number(progress.total_bytes || 0);
+      if (total > 0) {
+        return { pct, text: `${pct.toFixed(1)}% (${fmtBytes(completed)} / ${fmtBytes(total)})` };
+      }
+      return { pct, text: `${pct.toFixed(1)}%` };
+    }
+
+    function renderTaskProgressCell(task) {
+      const d = getTaskProgressDisplay(task);
+      return `
+        <div class="progress-wrap">
+          <div class="progress-track"><div class="progress-fill" style="width:${d.pct.toFixed(1)}%"></div></div>
+          <div class="progress-text">${d.text}</div>
+        </div>
+      `;
     }
 
     function renderRemotes(remotes) {
@@ -526,10 +738,8 @@
           <td>${r.name}</td>
           <td>${r.type}</td>
           <td><pre style="margin:0;white-space:pre-wrap;max-width:700px;">${JSON.stringify(r.config_json || {}, null, 2)}</pre></td>
-          <td>
-            <button class="btn secondary" onclick='fillRemoteForm("${encodeURIComponent(JSON.stringify({name: r.name, type: r.type, config_json: r.config_json || {}}))}")'>编辑</button>
-            <button class="btn secondary" onclick='duplicateRemote("${encodeURIComponent(JSON.stringify({name: r.name, type: r.type, config_json: r.config_json || {}}))}")'>复制</button>
-            <button class="btn danger" onclick='deleteRemote(${JSON.stringify(r.name)})'>删除</button>
+          <td class="actions-cell">
+            <button class="btn secondary action-trigger" onclick='toggleRemoteActionMenu(${JSON.stringify(r.name)}, event)'>操作 ▾</button>
           </td>
         </tr>
       `).join('');
@@ -567,7 +777,8 @@
     }
 
     async function refreshRemotes() {
-      renderRemotes(await api('/api/remotes'));
+      latestRemotes = await api('/api/remotes');
+      renderRemotes(latestRemotes);
     }
 
     async function refreshRuns() {
@@ -601,7 +812,8 @@
       if (selectedTaskId === id) {
         selectedTaskId = null;
         selectedTaskName = '';
-        eventBox.textContent = '';
+        taskEventLines = [];
+        renderTaskEvents();
         updateTaskEventHint();
       }
       await refreshTasks();
@@ -704,14 +916,96 @@
     window.openTaskModal = openTaskModal;
     window.closeTaskModal = closeTaskModal;
     window.toggleFilterPopover = toggleFilterPopover;
+    window.toggleTaskActionMenu = toggleTaskActionMenu;
+    window.closeAllTaskActionMenus = closeAllTaskActionMenus;
+    window.toggleRemoteActionMenu = toggleRemoteActionMenu;
+    window.closeAllRemoteActionMenus = closeAllRemoteActionMenus;
 
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.th-filter')) closeAllFilterPopovers();
+      if (!e.target.closest('.actions-cell')) closeAllTaskActionMenus();
+      if (!e.target.closest('.actions-cell')) closeAllRemoteActionMenus();
     });
+    window.addEventListener('resize', () => {
+      closeAllFilterPopovers();
+      closeAllTaskActionMenus();
+      closeAllRemoteActionMenus();
+    });
+    window.addEventListener('scroll', () => {
+      closeAllFilterPopovers();
+      closeAllTaskActionMenus();
+      closeAllRemoteActionMenus();
+    }, true);
 
     byId('openRemoteModalBtn').addEventListener('click', () => {
       byId('remoteForm').reset();
       openRemoteModal();
+    });
+    byId('taskActionRun').addEventListener('click', async () => {
+      if (activeActionTaskId == null) return;
+      const id = activeActionTaskId;
+      closeAllTaskActionMenus();
+      await runTask(id);
+    });
+    byId('taskActionEdit').addEventListener('click', () => {
+      if (activeActionTaskId == null) return;
+      const task = latestTasks.find((t) => t.id === activeActionTaskId);
+      closeAllTaskActionMenus();
+      if (!task) return;
+      fillTaskForm(encodeURIComponent(JSON.stringify(task)));
+    });
+    byId('taskActionDuplicate').addEventListener('click', () => {
+      if (activeActionTaskId == null) return;
+      const task = latestTasks.find((t) => t.id === activeActionTaskId);
+      closeAllTaskActionMenus();
+      if (!task) return;
+      duplicateTask(encodeURIComponent(JSON.stringify(task)));
+    });
+    byId('taskActionToggle').addEventListener('click', async () => {
+      if (activeActionTaskId == null) return;
+      const task = latestTasks.find((t) => t.id === activeActionTaskId);
+      const id = activeActionTaskId;
+      closeAllTaskActionMenus();
+      if (!task) return;
+      if (task.enabled) {
+        await pauseTask(id);
+      } else {
+        await resumeTask(id);
+      }
+    });
+    byId('taskActionDelete').addEventListener('click', async () => {
+      if (activeActionTaskId == null) return;
+      const id = activeActionTaskId;
+      closeAllTaskActionMenus();
+      await deleteTask(id);
+    });
+    byId('remoteActionEdit').addEventListener('click', () => {
+      if (activeActionRemoteName == null) return;
+      const remote = latestRemotes.find((r) => r.name === activeActionRemoteName);
+      closeAllRemoteActionMenus();
+      if (!remote) return;
+      fillRemoteForm(encodeURIComponent(JSON.stringify({
+        name: remote.name,
+        type: remote.type,
+        config_json: remote.config_json || {},
+      })));
+    });
+    byId('remoteActionDuplicate').addEventListener('click', () => {
+      if (activeActionRemoteName == null) return;
+      const remote = latestRemotes.find((r) => r.name === activeActionRemoteName);
+      closeAllRemoteActionMenus();
+      if (!remote) return;
+      duplicateRemote(encodeURIComponent(JSON.stringify({
+        name: remote.name,
+        type: remote.type,
+        config_json: remote.config_json || {},
+      })));
+    });
+    byId('remoteActionDelete').addEventListener('click', async () => {
+      if (activeActionRemoteName == null) return;
+      const name = activeActionRemoteName;
+      closeAllRemoteActionMenus();
+      await deleteRemote(name);
     });
     byId('closeRemoteModalBtn').addEventListener('click', closeRemoteModal);
     remoteModalBackdrop.addEventListener('click', (e) => {
@@ -803,6 +1097,18 @@
     taskStatusFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
     runsStatusFilter.addEventListener('change', () => renderRuns(getFilteredRuns()));
     runsTaskIdFilter.addEventListener('input', () => renderRuns(getFilteredRuns()));
+    eventsKeyword.addEventListener('input', () => {
+      renderTaskEvents();
+      if (eventsSearchTimer) clearTimeout(eventsSearchTimer);
+      eventsSearchTimer = setTimeout(() => {
+        if (selectedTaskId != null) {
+          loadTaskEventHistory(selectedTaskId).catch((e) => {
+            taskEventLines = [`[${new Date().toLocaleTimeString()}] 搜索事件失败: ${String(e)}`];
+            renderTaskEvents();
+          });
+        }
+      }, 250);
+    });
 
     function connectWs() {
       const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -810,9 +1116,40 @@
       ws.onmessage = async (ev) => {
         try {
           const payload = JSON.parse(ev.data);
+          const taskId = Number(payload.task_id);
+          if (Number.isFinite(taskId)) {
+            if (payload.event === 'task_started') {
+              setTaskProgress(taskId, {
+                progress_pct: 0,
+                completed_bytes: 0,
+                total_bytes: 0,
+              });
+            } else if (payload.event === 'task_planned') {
+              setTaskProgress(taskId, {
+                total_bytes: Number(payload.total_bytes || 0),
+              });
+            } else if (payload.event === 'task_progress') {
+              const totalBytes = Number(payload.total_bytes || 0);
+              const completedBytes = Number(payload.completed_bytes || 0);
+              const pct = Number.isFinite(Number(payload.progress_pct))
+                ? Number(payload.progress_pct)
+                : (totalBytes > 0 ? (completedBytes / totalBytes * 100) : 0);
+              setTaskProgress(taskId, {
+                progress_pct: pct,
+                completed_bytes: completedBytes,
+                total_bytes: totalBytes,
+              });
+            } else if (payload.event === 'task_completed') {
+              const isSuccess = String(payload.status || '') === 'success';
+              setTaskProgress(taskId, {
+                progress_pct: isSuccess ? 100 : clampProgress((taskProgressMap.get(taskId) || {}).progress_pct),
+              });
+            }
+          }
           if (selectedTaskId != null && Number(payload.task_id) === selectedTaskId) {
             appendTaskEvent(payload);
           }
+          renderTasks(getFilteredTasks());
           if (payload.event === 'task_completed' || payload.event === 'task_started') {
             await refreshRuns();
             await refreshDashboard();
