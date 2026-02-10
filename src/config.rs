@@ -20,7 +20,7 @@ pub enum RemoteConfig {
     Fs { root: String },
     #[serde(rename = "s3")]
     S3 {
-        bucket: String,
+        bucket: Option<String>,
         endpoint: Option<String>,
         region: Option<String>,
         access_key_id: Option<String>,
@@ -110,7 +110,8 @@ pub fn run_config_wizard() -> Result<()> {
         }
         1 => {
             let bucket: String = Input::new()
-                .with_prompt("S3 bucket")
+                .allow_empty(true)
+                .with_prompt("S3 bucket (optional)")
                 .interact_text()
                 .context("failed to read bucket")?;
             let endpoint: String = Input::new()
@@ -145,7 +146,7 @@ pub fn run_config_wizard() -> Result<()> {
                 .context("failed to read root prefix")?;
 
             RemoteConfig::S3 {
-                bucket,
+                bucket: optional(bucket),
                 endpoint: optional(endpoint),
                 region: optional(region),
                 access_key_id: optional(ak),

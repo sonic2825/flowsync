@@ -75,6 +75,15 @@ pub struct ServerArgs {
 
     #[arg(long, default_value = "rust_s3_sync.db")]
     pub db: String,
+
+    #[arg(long, default_value_t = 7)]
+    pub event_retention_days: u32,
+
+    #[arg(long, default_value_t = 200000)]
+    pub event_max_rows: u64,
+
+    #[arg(long, default_value_t = 300)]
+    pub event_cleanup_interval_secs: u64,
 }
 
 #[derive(Debug, Subcommand)]

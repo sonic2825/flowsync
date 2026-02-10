@@ -39,25 +39,25 @@ cargo run -- config init
 2) 复制：
 
 ```bash
-cargo run -- copy local:/data/src s3prod:bucket/prefix
+cargo run -- copy local:/data/src s3prod:prefix
 ```
 
 3) 同步（目标镜像源，包含删除）：
 
 ```bash
-cargo run -- sync local:/data/src s3prod:bucket/prefix --dry-run
+cargo run -- sync local:/data/src s3prod:prefix --dry-run
 ```
 
 4) 移动（复制后删源）：
 
 ```bash
-cargo run -- move local:/data/src s3prod:bucket/prefix
+cargo run -- move local:/data/src s3prod:prefix
 ```
 
 5) 列表：
 
 ```bash
-cargo run -- ls s3prod:bucket/prefix
+cargo run -- ls s3prod:prefix
 ```
 
 6) 启动 Web 管理后台与任务调度：
@@ -66,11 +66,27 @@ cargo run -- ls s3prod:bucket/prefix
 cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 ```
 
+可选事件回放清理策略参数（默认开启）：
+
+```bash
+cargo run -- server \
+  --host 127.0.0.1 \
+  --port 3030 \
+  --db rust_s3_sync.db \
+  --event-retention-days 7 \
+  --event-max-rows 200000 \
+  --event-cleanup-interval-secs 300
+```
+
+- `--event-retention-days`：按天清理历史事件（`0` 表示不按天清理）
+- `--event-max-rows`：事件表最大行数（超出删最早；`0` 表示不按行数清理）
+- `--event-cleanup-interval-secs`：后台清理周期秒数（最小 30 秒）
+
 打开浏览器访问：`http://127.0.0.1:3030`
 
 ## 命令详解
 
-以下命令均使用 `remote:path` 定位数据源和目标（例如 `local:docs`、`s3prod:bucket/prefix`）。
+以下命令均使用 `remote:path` 定位数据源和目标（例如 `local:docs`、`s3prod:prefix` 或 `s3dyn:bucket/prefix`）。
 
 ### `copy`
 
@@ -79,7 +95,7 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 - 示例：
 
 ```bash
-cargo run -- copy local:/data/src s3prod:bucket/prefix
+cargo run -- copy local:/data/src s3prod:prefix
 ```
 
 ### `sync`
@@ -90,7 +106,7 @@ cargo run -- copy local:/data/src s3prod:bucket/prefix
 - 示例：
 
 ```bash
-cargo run -- --dry-run sync local:/data/src s3prod:bucket/prefix
+cargo run -- --dry-run sync local:/data/src s3prod:prefix
 ```
 
 ### `move`
@@ -101,7 +117,7 @@ cargo run -- --dry-run sync local:/data/src s3prod:bucket/prefix
 - 示例：
 
 ```bash
-cargo run -- move local:/data/src s3prod:bucket/prefix
+cargo run -- move local:/data/src s3prod:prefix
 ```
 
 ### `ls`
@@ -111,7 +127,7 @@ cargo run -- move local:/data/src s3prod:bucket/prefix
 - 示例：
 
 ```bash
-cargo run -- ls s3prod:bucket/prefix
+cargo run -- ls s3prod:prefix
 ```
 
 ### `config init`
@@ -159,31 +175,31 @@ cargo run -- config init
 1) 高并发复制（网络和目标端可承受时）：
 
 ```bash
-cargo run -- --transfers 32 --checkers 32 copy local:/data/src s3prod:bucket/prefix
+cargo run -- --transfers 32 --checkers 32 copy local:/data/src s3prod:prefix
 ```
 
 2) 只看计划，不真正执行：
 
 ```bash
-cargo run -- --dry-run sync local:/data/src s3prod:bucket/prefix
+cargo run -- --dry-run sync local:/data/src s3prod:prefix
 ```
 
 3) 用 checksum 做严格增量同步：
 
 ```bash
-cargo run -- --checksum --checkers 16 sync local:/data/src s3prod:bucket/prefix
+cargo run -- --checksum --checkers 16 sync local:/data/src s3prod:prefix
 ```
 
 4) 限速同步（避免占满链路）：
 
 ```bash
-cargo run -- --transfers 16 --bandwidth-limit 100MB sync local:/data/src s3prod:bucket/prefix
+cargo run -- --transfers 16 --bandwidth-limit 100MB sync local:/data/src s3prod:prefix
 ```
 
 5) 只同步指定目录并排除临时文件：
 
 ```bash
-cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync local:/data/src s3prod:bucket/prefix
+cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync local:/data/src s3prod:prefix
 ```
 
 ## Web 管理后台与任务调度
@@ -223,6 +239,18 @@ cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync
 ```json
 {
   "bucket": "my-bucket",
+  "endpoint": "https://s3.us-east-1.amazonaws.com",
+  "region": "us-east-1",
+  "url_style": "path",
+  "root": ""
+}
+```
+
+2.1) `s3`（不在 Remote 固定 bucket，任务里动态指定）
+
+```json
+{
+  "bucket": "",
   "endpoint": "https://s3.us-east-1.amazonaws.com",
   "region": "us-east-1",
   "url_style": "path",
@@ -290,7 +318,9 @@ cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync
 
 #### 任务里如何引用 Remote
 
-- `source` / `destination` 必须使用 `remote:path` 格式（例如 `local:docs/a.txt`、`s3prod:bucket/prefix`）
+- `source` / `destination` 必须使用 `remote:path` 格式
+- 若 Remote 的 `s3.bucket` 已配置：`path` 是 bucket 内前缀（例如 `s3prod:docs/a.txt`）
+- 若 Remote 的 `s3.bucket` 为空：`path` 必须写成 `bucket/前缀`（例如 `s3dyn:my-bucket/docs/a.txt`）
 - `path` 部分会去掉开头的 `/` 再拼接到对应后端 `root` 下
 - 建议把 `path` 写成相对路径（如 `local:subdir/file.txt`），避免路径歧义
 
@@ -298,6 +328,7 @@ cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync
 
 - `invalid location, expected remote:path`：`source/destination` 没有 `:` 分隔
 - `remote '<name>' not found in config`：任务引用了不存在的 remote 名称
+- `s3 remote '<name>' requires bucket in 'remote:bucket/path' when remote bucket is empty`：该 S3 Remote 未配置 bucket，任务 path 也没带 bucket
 - `config_json must be object`：`config_json` 不是 JSON 对象（例如传了字符串或数组）
 
 #### 从零到可用（最短实操示例）
@@ -374,6 +405,7 @@ ls -la /Users/td/script/rust-s3-sync/test/dst
 - `POST /api/tasks/:id/pause`：暂停调度
 - `POST /api/tasks/:id/resume`：恢复调度
 - `GET /api/runs?task_id=<id>&limit=50`：执行历史
+- `GET /api/events?task_id=<id>&limit=300`：任务事件回放（或用 `run_id` 查询）
 - `GET /api/dashboard`：仪表盘数据（CPU/内存、今日流量、运行任务数）
 - `GET /ws`：实时任务进度与错误事件
 
@@ -428,6 +460,14 @@ region = "us-east-1"
 url_style = "path" # path | virtual_hosted
 root = ""
 # access_key_id / secret_access_key 可不写，走环境变量 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+
+[remotes.s3dyn]
+type = "s3"
+bucket = "" # 或不写该字段；任务里用 s3dyn:bucket/prefix 指定 bucket
+endpoint = "https://s3.us-east-1.amazonaws.com"
+region = "us-east-1"
+url_style = "path"
+root = ""
 
 [remotes.sftp1]
 type = "sftp"

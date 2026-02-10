@@ -54,7 +54,7 @@ async fn main() -> Result<()> {
         Commands::Ls(args) => {
             let cfg = config::AppConfig::load()?;
             let target = Location::parse(&args.target)?;
-            let op = remote::build_operator(&cfg, &target.remote)?;
+            let (target, op) = remote::resolve_location_and_operator(&cfg, target)?;
             list(&op, &target.path).await
         }
         Commands::Copy(args) => {
@@ -66,7 +66,14 @@ async fn main() -> Result<()> {
         Commands::Move(args) => {
             execute_transfer(SyncMode::Move, args.source, args.destination, &runtime).await
         }
-        Commands::Server(args) => run_server(args.host, args.port, args.db).await,
+        Commands::Server(args) => {
+            let policy = server::EventCleanupPolicy {
+                retention_days: args.event_retention_days,
+                max_rows: args.event_max_rows,
+                interval_secs: args.event_cleanup_interval_secs,
+            };
+            run_server(args.host, args.port, args.db, policy).await
+        }
     }
 }
 
@@ -81,8 +88,8 @@ async fn execute_transfer(
     let dst = Location::parse(&destination)
         .with_context(|| format!("invalid destination: {destination}"))?;
 
-    let source_op = remote::build_operator(&cfg, &src.remote)?;
-    let target_op = remote::build_operator(&cfg, &dst.remote)?;
+    let (src, source_op) = remote::resolve_location_and_operator(&cfg, src)?;
+    let (dst, target_op) = remote::resolve_location_and_operator(&cfg, dst)?;
 
     let options = SyncOptions {
         dry_run: runtime.dry_run,

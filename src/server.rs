@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -11,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use chrono::{Datelike, Local, TimeZone, Utc};
+use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -24,7 +25,7 @@ use uuid::Uuid;
 
 use crate::config::{AppConfig, RemoteConfig};
 use crate::engine::{ProgressReporter, SyncMode, SyncOptions, TransferEvent, run_transfer_with_reporter};
-use crate::remote::{Location, build_operator};
+use crate::remote::{Location, resolve_location_and_operator};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
@@ -33,6 +34,13 @@ struct WebAssets;
 #[derive(Clone)]
 struct Db {
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct EventCleanupPolicy {
+    pub retention_days: u32,
+    pub max_rows: u64,
+    pub interval_secs: u64,
 }
 
 impl Db {
@@ -105,6 +113,19 @@ impl Db {
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(run_id) REFERENCES task_runs(id) ON DELETE CASCADE
                 );
+
+                CREATE TABLE IF NOT EXISTS task_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    run_id INTEGER,
+                    event_type TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                    FOREIGN KEY(run_id) REFERENCES task_runs(id) ON DELETE CASCADE
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_events_task_id_id ON task_events(task_id, id);
+                CREATE INDEX IF NOT EXISTS idx_task_events_run_id_id ON task_events(run_id, id);
                 "#,
             )
             .context("failed to init sqlite schema")?;
@@ -229,6 +250,28 @@ impl Db {
         })
         .await
         .context("list tasks join error")?
+    }
+
+    async fn list_latest_task_status(&self) -> Result<HashMap<i64, String>> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<HashMap<i64, String>> {
+            let conn = db.open()?;
+            let mut stmt = conn.prepare(
+                "SELECT t.id,
+                        (SELECT r.status FROM task_runs r WHERE r.task_id=t.id ORDER BY r.id DESC LIMIT 1) AS last_status
+                 FROM tasks t",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut out = HashMap::new();
+            while let Some(row) = rows.next()? {
+                let task_id: i64 = row.get(0)?;
+                let last_status: Option<String> = row.get(1)?;
+                out.insert(task_id, last_status.unwrap_or_else(|| "idle".to_string()));
+            }
+            Ok(out)
+        })
+        .await
+        .context("list latest task status join error")?
     }
 
     async fn get_task(&self, id: i64) -> Result<Option<TaskRecord>> {
@@ -448,6 +491,104 @@ impl Db {
         .context("insert run errors join error")?
     }
 
+    async fn insert_task_event(
+        &self,
+        task_id: i64,
+        run_id: Option<i64>,
+        event_type: String,
+        payload: String,
+        created_at: String,
+    ) -> Result<()> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = db.open()?;
+            conn.execute(
+                "INSERT INTO task_events (task_id,run_id,event_type,payload,created_at) VALUES (?1,?2,?3,?4,?5)",
+                params![task_id, run_id, event_type, payload, created_at],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("insert task event join error")?
+    }
+
+    async fn list_task_events(&self, query: ListTaskEventsQuery) -> Result<Vec<TaskEventRecord>> {
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<TaskEventRecord>> {
+            let conn = db.open()?;
+            let limit = query.limit.unwrap_or(200).clamp(1, 2000) as i64;
+            let mut out = Vec::new();
+            if let Some(run_id) = query.run_id {
+                let mut stmt = conn.prepare(
+                    "SELECT id,task_id,run_id,event_type,payload,created_at
+                     FROM task_events
+                     WHERE run_id=?1
+                     ORDER BY id DESC
+                     LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(params![run_id, limit])?;
+                while let Some(row) = rows.next()? {
+                    out.push(TaskEventRecord::from_row(row)?);
+                }
+            } else if let Some(task_id) = query.task_id {
+                let mut stmt = conn.prepare(
+                    "SELECT id,task_id,run_id,event_type,payload,created_at
+                     FROM task_events
+                     WHERE task_id=?1
+                     ORDER BY id DESC
+                     LIMIT ?2",
+                )?;
+                let mut rows = stmt.query(params![task_id, limit])?;
+                while let Some(row) = rows.next()? {
+                    out.push(TaskEventRecord::from_row(row)?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id,task_id,run_id,event_type,payload,created_at
+                     FROM task_events
+                     ORDER BY id DESC
+                     LIMIT ?1",
+                )?;
+                let mut rows = stmt.query(params![limit])?;
+                while let Some(row) = rows.next()? {
+                    out.push(TaskEventRecord::from_row(row)?);
+                }
+            }
+            out.reverse();
+            Ok(out)
+        })
+        .await
+        .context("list task events join error")?
+    }
+
+    async fn cleanup_task_events(&self, policy: EventCleanupPolicy) -> Result<()> {
+        if policy.retention_days == 0 && policy.max_rows == 0 {
+            return Ok(());
+        }
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let conn = db.open()?;
+            if policy.retention_days > 0 {
+                let cutoff = (Utc::now() - ChronoDuration::days(policy.retention_days as i64)).to_rfc3339();
+                conn.execute("DELETE FROM task_events WHERE created_at < ?1", params![cutoff])?;
+            }
+            if policy.max_rows > 0 {
+                let count: i64 = conn.query_row("SELECT COUNT(*) FROM task_events", [], |r| r.get(0))?;
+                let max_rows = policy.max_rows as i64;
+                if count > max_rows {
+                    let remove = count - max_rows;
+                    conn.execute(
+                        "DELETE FROM task_events WHERE id IN (SELECT id FROM task_events ORDER BY id ASC LIMIT ?1)",
+                        params![remove],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .await
+        .context("cleanup task events join error")?
+    }
+
     async fn list_runs(&self, query: ListRunsQuery) -> Result<Vec<RunRecord>> {
         let db = self.clone();
         tokio::task::spawn_blocking(move || -> Result<Vec<RunRecord>> {
@@ -540,6 +681,13 @@ struct TaskRecord {
     bandwidth_limit: Option<String>,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct TaskListItem {
+    #[serde(flatten)]
+    task: TaskRecord,
+    status: String,
 }
 
 impl TaskRecord {
@@ -700,9 +848,41 @@ impl RunRecord {
     }
 }
 
+#[derive(Debug, Serialize)]
+struct TaskEventRecord {
+    id: i64,
+    task_id: i64,
+    run_id: Option<i64>,
+    event_type: String,
+    payload: serde_json::Value,
+    created_at: String,
+}
+
+impl TaskEventRecord {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        let payload_raw: String = row.get(4)?;
+        let payload = serde_json::from_str(&payload_raw).unwrap_or_else(|_| json!({ "raw": payload_raw }));
+        Ok(Self {
+            id: row.get(0)?,
+            task_id: row.get(1)?,
+            run_id: row.get(2)?,
+            event_type: row.get(3)?,
+            payload,
+            created_at: row.get(5)?,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Copy)]
 struct ListRunsQuery {
     task_id: Option<i64>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+struct ListTaskEventsQuery {
+    task_id: Option<i64>,
+    run_id: Option<i64>,
     limit: Option<u32>,
 }
 
@@ -753,9 +933,15 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-pub async fn run_server(host: String, port: u16, db_path: String) -> Result<()> {
+pub async fn run_server(
+    host: String,
+    port: u16,
+    db_path: String,
+    event_cleanup_policy: EventCleanupPolicy,
+) -> Result<()> {
     let db = Db::new(PathBuf::from(db_path));
     db.init().await?;
+    db.cleanup_task_events(event_cleanup_policy).await?;
 
     let scheduler = JobScheduler::new().await.context("create scheduler failed")?;
     let (ws_tx, _) = broadcast::channel(1024);
@@ -796,11 +982,26 @@ pub async fn run_server(host: String, port: u16, db_path: String) -> Result<()> 
         .route("/api/tasks/:id/pause", post(api_pause_task))
         .route("/api/tasks/:id/resume", post(api_resume_task))
         .route("/api/runs", get(api_list_runs))
+        .route("/api/events", get(api_list_events))
         .route("/api/dashboard", get(api_dashboard))
         .route("/ws", get(ws_handler))
         .route("/", get(index_handler))
         .fallback(get(index_handler))
         .with_state(state);
+
+    if event_cleanup_policy.retention_days > 0 || event_cleanup_policy.max_rows > 0 {
+        let db_for_cleanup = db.clone();
+        tokio::spawn(async move {
+            let interval_secs = event_cleanup_policy.interval_secs.max(30);
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            loop {
+                ticker.tick().await;
+                if let Err(err) = db_for_cleanup.cleanup_task_events(event_cleanup_policy).await {
+                    warn!(error = %err, "task events cleanup failed");
+                }
+            }
+        });
+    }
 
     let addr: SocketAddr = format!("{host}:{port}")
         .parse()
@@ -855,9 +1056,27 @@ async fn api_delete_remote(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn api_list_tasks(State(state): State<Arc<AppState>>) -> Result<Json<Vec<TaskRecord>>, ApiError> {
+async fn api_list_tasks(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<TaskListItem>>, ApiError> {
     let tasks = state.db.list_tasks().await?;
-    Ok(Json(tasks))
+    let latest_status = state.db.list_latest_task_status().await?;
+    let running = state.running_tasks.lock().await.clone();
+    let out = tasks
+        .into_iter()
+        .map(|task| {
+            let status = if running.contains(&task.id) {
+                "running".to_string()
+            } else {
+                latest_status
+                    .get(&task.id)
+                    .cloned()
+                    .unwrap_or_else(|| "idle".to_string())
+            };
+            TaskListItem { task, status }
+        })
+        .collect();
+    Ok(Json(out))
 }
 
 async fn api_create_task(
@@ -941,6 +1160,16 @@ async fn api_list_runs(
     Query(query): Query<ListRunsQuery>,
 ) -> Result<Json<Vec<RunRecord>>, ApiError> {
     Ok(Json(state.db.list_runs(query).await?))
+}
+
+async fn api_list_events(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListTaskEventsQuery>,
+) -> Result<Json<Vec<TaskEventRecord>>, ApiError> {
+    if query.task_id.is_none() && query.run_id.is_none() {
+        return Err(ApiError::bad_request("task_id or run_id is required"));
+    }
+    Ok(Json(state.db.list_task_events(query).await?))
 }
 
 async fn api_dashboard(State(state): State<Arc<AppState>>) -> Result<Json<DashboardResponse>, ApiError> {
@@ -1056,27 +1285,29 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
     }
 
     let run_id = state.db.create_run(task.id, trigger).await?;
-    broadcast_json(
-        &state.ws_tx,
-        json!({
-            "event": "task_started",
-            "task_id": task.id,
-            "run_id": run_id,
-            "name": task.name,
-            "trigger": trigger,
-            "at": Utc::now().to_rfc3339(),
-        }),
-    );
+    let started_event = json!({
+        "event": "task_started",
+        "task_id": task.id,
+        "run_id": run_id,
+        "name": task.name,
+        "trigger": trigger,
+        "at": Utc::now().to_rfc3339(),
+    });
+    broadcast_json(&state.ws_tx, started_event.clone());
+    persist_task_event_async(state.db.clone(), task.id, Some(run_id), started_event);
 
     let copied_files = Arc::new(AtomicU64::new(0));
     let failed_files = Arc::new(AtomicU64::new(0));
     let copied_bytes = Arc::new(AtomicU64::new(0));
+    let last_progress_emit_ms = Arc::new(AtomicU64::new(0));
     let error_records = Arc::new(std::sync::Mutex::new(Vec::<RunErrorRecord>::new()));
 
     let ws_tx = state.ws_tx.clone();
+    let db = state.db.clone();
     let copied_files_ref = copied_files.clone();
     let failed_files_ref = failed_files.clone();
     let copied_bytes_ref = copied_bytes.clone();
+    let last_progress_emit_ms_ref = last_progress_emit_ms.clone();
     let errors_ref = error_records.clone();
     let task_id = task.id;
     let run_id_for_event = run_id;
@@ -1087,18 +1318,17 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
             delete_count,
             total_size,
         } => {
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_planned",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "copy_count": copy_count,
-                    "delete_count": delete_count,
-                    "total_bytes": total_size,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_planned",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "copy_count": copy_count,
+                "delete_count": delete_count,
+                "total_bytes": total_size,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::Copied {
             rel_path,
@@ -1108,25 +1338,31 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
         } => {
             copied_files_ref.fetch_add(1, Ordering::Relaxed);
             copied_bytes_ref.store(completed_bytes, Ordering::Relaxed);
+            let now_ms = now_unix_millis();
+            let last_emit = last_progress_emit_ms_ref.load(Ordering::Relaxed);
+            let should_emit = completed_bytes >= total_bytes || now_ms.saturating_sub(last_emit) >= 250;
+            if !should_emit {
+                return;
+            }
+            last_progress_emit_ms_ref.store(now_ms, Ordering::Relaxed);
             let progress = if total_bytes == 0 {
                 100.0
             } else {
                 (completed_bytes as f64 / total_bytes as f64 * 100.0).min(100.0)
             };
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_progress",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "path": rel_path,
-                    "file_bytes": size,
-                    "completed_bytes": completed_bytes,
-                    "total_bytes": total_bytes,
-                    "progress_pct": progress,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_progress",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "file_bytes": size,
+                "completed_bytes": completed_bytes,
+                "total_bytes": total_bytes,
+                "progress_pct": progress,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::CopyFailed { rel_path, error } => {
             failed_files_ref.fetch_add(1, Ordering::Relaxed);
@@ -1137,17 +1373,16 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                     created_at: Utc::now().to_rfc3339(),
                 });
             }
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_error",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "path": rel_path,
-                    "message": error,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_error",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "message": error,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::DeleteFailed { rel_path, error } => {
             failed_files_ref.fetch_add(1, Ordering::Relaxed);
@@ -1158,17 +1393,16 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                     created_at: Utc::now().to_rfc3339(),
                 });
             }
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_error",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "path": rel_path,
-                    "message": error,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_error",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "message": error,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::MoveSourceDeleteFailed { rel_path, error } => {
             failed_files_ref.fetch_add(1, Ordering::Relaxed);
@@ -1179,53 +1413,49 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                     created_at: Utc::now().to_rfc3339(),
                 });
             }
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_error",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "path": rel_path,
-                    "message": error,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_error",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "message": error,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::Finished { failures } => {
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_finished_signal",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "failures": failures,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_finished_signal",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "failures": failures,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::Deleted { rel_path } => {
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_delete",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "path": rel_path,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_delete",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
         TransferEvent::MoveSourceDeleted { rel_path } => {
-            broadcast_json(
-                &ws_tx,
-                json!({
-                    "event": "task_move_source_deleted",
-                    "task_id": task_id,
-                    "run_id": run_id_for_event,
-                    "path": rel_path,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_move_source_deleted",
+                "task_id": task_id,
+                "run_id": run_id_for_event,
+                "path": rel_path,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&ws_tx, event.clone());
+            persist_task_event_async(db.clone(), task_id, Some(run_id_for_event), event);
         }
     });
 
@@ -1239,8 +1469,8 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
             .with_context(|| format!("invalid source location: {}", task.source))?;
         let destination = Location::parse(&task.destination)
             .with_context(|| format!("invalid destination location: {}", task.destination))?;
-        let source_op = build_operator(&cfg, &source.remote)?;
-        let target_op = build_operator(&cfg, &destination.remote)?;
+        let (source, source_op) = resolve_location_and_operator(&cfg, source)?;
+        let (destination, target_op) = resolve_location_and_operator(&cfg, destination)?;
         let mode = parse_mode(&task.mode)?;
         let options = SyncOptions {
             dry_run: task.dry_run,
@@ -1287,19 +1517,18 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 )
                 .await?;
             state.db.insert_run_errors(run_id, error_records_vec).await?;
-            broadcast_json(
-                &state.ws_tx,
-                json!({
-                    "event": "task_completed",
-                    "task_id": task.id,
-                    "run_id": run_id,
-                    "status": "success",
-                    "copied_files": copied_files_val,
-                    "failed_files": failed_files_val,
-                    "copied_bytes": copied_bytes_val,
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_completed",
+                "task_id": task.id,
+                "run_id": run_id,
+                "status": "success",
+                "copied_files": copied_files_val,
+                "failed_files": failed_files_val,
+                "copied_bytes": copied_bytes_val,
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&state.ws_tx, event.clone());
+            persist_task_event_async(state.db.clone(), task.id, Some(run_id), event);
         }
         Err(err) => {
             state
@@ -1314,20 +1543,19 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                 )
                 .await?;
             state.db.insert_run_errors(run_id, error_records_vec).await?;
-            broadcast_json(
-                &state.ws_tx,
-                json!({
-                    "event": "task_completed",
-                    "task_id": task.id,
-                    "run_id": run_id,
-                    "status": "failed",
-                    "copied_files": copied_files_val,
-                    "failed_files": failed_files_val,
-                    "copied_bytes": copied_bytes_val,
-                    "error": err.to_string(),
-                    "at": Utc::now().to_rfc3339(),
-                }),
-            );
+            let event = json!({
+                "event": "task_completed",
+                "task_id": task.id,
+                "run_id": run_id,
+                "status": "failed",
+                "copied_files": copied_files_val,
+                "failed_files": failed_files_val,
+                "copied_bytes": copied_bytes_val,
+                "error": err.to_string(),
+                "at": Utc::now().to_rfc3339(),
+            });
+            broadcast_json(&state.ws_tx, event.clone());
+            persist_task_event_async(state.db.clone(), task.id, Some(run_id), event);
         }
     }
 
@@ -1448,6 +1676,33 @@ fn broadcast_json(sender: &broadcast::Sender<String>, value: serde_json::Value) 
     let _ = sender.send(value.to_string());
 }
 
+fn persist_task_event_async(db: Db, task_id: i64, run_id: Option<i64>, value: serde_json::Value) {
+    let event_type = value
+        .get("event")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let created_at = value
+        .get("at")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| "")
+        .to_string();
+    let payload = value.to_string();
+    tokio::spawn(async move {
+        let at = if created_at.is_empty() {
+            Utc::now().to_rfc3339()
+        } else {
+            created_at
+        };
+        if let Err(err) = db
+            .insert_task_event(task_id, run_id, event_type, payload, at)
+            .await
+        {
+            warn!(task_id = task_id, run_id = ?run_id, error = %err, "persist task event failed");
+        }
+    });
+}
+
 fn bool_to_i64(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
@@ -1466,4 +1721,11 @@ fn default_transfers() -> u32 {
 
 fn default_checkers() -> u32 {
     8
+}
+
+fn now_unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
