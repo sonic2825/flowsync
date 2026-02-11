@@ -317,7 +317,15 @@
         <table>
           <thead>
             <tr>
-              <th>ID</th><th>名称</th>
+              <th>ID</th>
+              <th class="th-filter">
+                <span class="th-filter-head">名称 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('taskNamePopover', event)">▾</button></span>
+                <div class="filter-popover" id="taskNamePopover">
+                  <select id="taskNameFilter">
+                    <option value="">名称: 全部</option>
+                  </select>
+                </div>
+              </th>
               <th class="th-filter">
                 <span class="th-filter-head">模式 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('taskModePopover', event)">▾</button></span>
                 <div class="filter-popover" id="taskModePopover">
@@ -514,6 +522,7 @@
     const taskEventHint = byId('taskEventHint');
     const remoteModalBackdrop = byId('remoteModalBackdrop');
     const taskModalBackdrop = byId('taskModalBackdrop');
+    const taskNameFilter = byId('taskNameFilter');
     const taskModeFilter = byId('taskModeFilter');
     const taskStatusFilter = byId('taskStatusFilter');
     const runsTaskIdFilter = byId('runsTaskIdFilter');
@@ -700,10 +709,12 @@
     }
 
     function getFilteredTasks() {
+      const name = taskNameFilter.value;
       const mode = taskModeFilter.value;
       const status = taskStatusFilter.value;
       return latestTasks.filter((t) => {
         const effectiveStatus = statusLabel(t.status, t.enabled);
+        if (name && t.name !== name) return false;
         if (mode && t.mode !== mode) return false;
         if (status && effectiveStatus !== status) return false;
         return true;
@@ -812,8 +823,20 @@
       `).join('');
     }
 
+    function refreshTaskNameFilterOptions() {
+      const selectedName = taskNameFilter.value;
+      const names = Array.from(new Set((latestTasks || []).map((t) => String(t.name || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      taskNameFilter.innerHTML = `<option value="">名称: 全部</option>${names.map((name) => `<option value="${name.replace(/"/g, '&quot;')}">${name}</option>`).join('')}`;
+      if (selectedName && names.includes(selectedName)) {
+        taskNameFilter.value = selectedName;
+      } else {
+        taskNameFilter.value = '';
+      }
+    }
+
     async function refreshTasks() {
       latestTasks = await api('/api/tasks');
+      refreshTaskNameFilterOptions();
       renderTasks(getFilteredTasks());
     }
 
@@ -1138,6 +1161,7 @@
       await refreshRuns();
     });
 
+    taskNameFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
     taskModeFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
     taskStatusFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
     runsStatusFilter.addEventListener('change', () => renderRuns(getFilteredRuns()));
