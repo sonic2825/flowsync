@@ -313,6 +313,30 @@
       gap: 10px;
       justify-content: flex-end;
     }
+    .toast-wrap {
+      position: fixed;
+      right: 14px;
+      bottom: 14px;
+      z-index: 10010;
+      display: grid;
+      gap: 8px;
+      max-width: min(420px, calc(100vw - 28px));
+    }
+    .toast {
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--text);
+      padding: 10px 12px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.18);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .toast.error {
+      border-color: #f2b8b8;
+      background: #fff3f3;
+      color: #8f1f1f;
+    }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @keyframes popIn { from { transform: translateY(6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
   </style>
@@ -323,6 +347,7 @@
       <h1>FlowSync Web 管理后台</h1>
       <div class="subtle">任务管理、Remotes 配置与运行审计</div>
       <div class="guard-note" id="adminGuardStatus">只读访问已开启。查看敏感配置及高危写操作需要管理员安全密码。</div>
+      <div class="subtle" id="syncStatus" aria-live="polite">连接状态：初始化中</div>
     </div>
 
     <div class="section">
@@ -361,16 +386,16 @@
             <tr>
               <th>ID</th>
               <th class="th-filter">
-                <span class="th-filter-head">名称 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('taskNamePopover', event)">▾</button></span>
+                <span class="th-filter-head">名称 <button class="filter-trigger" id="taskNameFilterBtn" type="button">▾</button></span>
                 <div class="filter-popover" id="taskNamePopover">
-                  <input id="taskNameFilter" list="taskNameOptions" placeholder="名称关键词（留空=全部）" />
+                  <input id="taskNameFilter" list="taskNameOptions" placeholder="名称关键词（留空=全部）" aria-label="按任务名称筛选" />
                   <datalist id="taskNameOptions"></datalist>
                 </div>
               </th>
               <th class="th-filter">
-                <span class="th-filter-head">模式 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('taskModePopover', event)">▾</button></span>
+                <span class="th-filter-head">模式 <button class="filter-trigger" id="taskModeFilterBtn" type="button">▾</button></span>
                 <div class="filter-popover" id="taskModePopover">
-                  <select id="taskModeFilter">
+                  <select id="taskModeFilter" aria-label="按任务模式筛选">
                     <option value="">模式: 全部</option>
                     <option value="copy">copy</option>
                     <option value="sync">sync</option>
@@ -380,9 +405,9 @@
               </th>
               <th>源</th><th>目标</th><th>Cron</th><th>启用</th>
               <th class="th-filter">
-                <span class="th-filter-head">状态 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('taskStatusPopover', event)">▾</button></span>
+                <span class="th-filter-head">状态 <button class="filter-trigger" id="taskStatusFilterBtn" type="button">▾</button></span>
                 <div class="filter-popover" id="taskStatusPopover">
-                  <select id="taskStatusFilter">
+                  <select id="taskStatusFilter" aria-label="按任务状态筛选">
                     <option value="">状态: 全部</option>
                     <option value="running">running</option>
                     <option value="success">success</option>
@@ -405,9 +430,9 @@
       <h2 style="margin-bottom:8px;">任务实时事件</h2>
       <div class="subtle" id="taskEventHint">请先点击上方任务行查看该任务实时事件</div>
       <div style="margin:8px 0;">
-        <input id="eventsKeyword" placeholder="搜索实时事件关键词（如文件名）" />
+        <input id="eventsKeyword" placeholder="搜索实时事件关键词（如文件名）" aria-label="搜索实时事件关键词" />
       </div>
-      <div class="log-box" id="events"></div>
+      <div class="log-box" id="events" role="log" aria-live="polite" aria-atomic="false"></div>
     </div>
 
     <div class="section">
@@ -420,15 +445,15 @@
             <tr>
               <th>Run ID</th>
               <th class="th-filter">
-                <span class="th-filter-head">Task ID <button class="filter-trigger" type="button" onclick="toggleFilterPopover('runsTaskIdPopover', event)">▾</button></span>
+                <span class="th-filter-head">Task ID <button class="filter-trigger" id="runsTaskIdFilterBtn" type="button">▾</button></span>
                 <div class="filter-popover" id="runsTaskIdPopover">
-                  <input id="runsTaskIdFilter" placeholder="全部" />
+                  <input id="runsTaskIdFilter" placeholder="全部" aria-label="按 Task ID 筛选审计日志" />
                 </div>
               </th>
               <th class="th-filter">
-                <span class="th-filter-head">状态 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('runsStatusPopover', event)">▾</button></span>
+                <span class="th-filter-head">状态 <button class="filter-trigger" id="runsStatusFilterBtn" type="button">▾</button></span>
                 <div class="filter-popover" id="runsStatusPopover">
-                  <select id="runsStatusFilter">
+                  <select id="runsStatusFilter" aria-label="按状态筛选审计日志">
                     <option value="">状态: 全部</option>
                     <option value="running">running</option>
                     <option value="success">success</option>
@@ -444,7 +469,7 @@
       </div>
     </div>
   </div>
-  <div class="action-menu action-menu-top" id="taskActionMenu" onclick="event.stopPropagation()">
+  <div class="action-menu action-menu-top" id="taskActionMenu">
     <button id="taskActionRun" type="button">立即运行</button>
     <button id="taskActionEdit" type="button">编辑</button>
     <button id="taskActionDuplicate" type="button">复制</button>
@@ -452,7 +477,7 @@
     <hr />
     <button class="danger" id="taskActionDelete" type="button">删除</button>
   </div>
-  <div class="action-menu action-menu-top" id="remoteActionMenu" onclick="event.stopPropagation()">
+  <div class="action-menu action-menu-top" id="remoteActionMenu">
     <button id="remoteActionEdit" type="button">编辑</button>
     <button id="remoteActionDuplicate" type="button">复制</button>
     <hr />
@@ -467,8 +492,8 @@
       </div>
       <form id="remoteForm">
         <div class="row">
-          <input id="remoteName" placeholder="remote 名称（如 local / s3prod）" required />
-          <select id="remoteType">
+          <input id="remoteName" placeholder="remote 名称（如 local / s3prod）" aria-label="Remote 名称" required />
+          <select id="remoteType" aria-label="Remote 类型">
             <option value="fs">fs</option>
             <option value="s3">s3</option>
             <option value="sftp">sftp</option>
@@ -478,7 +503,7 @@
         <div class="row" style="margin-top:10px;">
           <textarea id="remoteConfigJson" rows="7" placeholder='config_json（JSON对象，不含type字段）
 示例(fs): {"root": "/"}
-示例(s3): {"bucket":"my-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","url_style":"path","root":""}' required></textarea>
+示例(s3): {"bucket":"my-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","url_style":"path","root":""}' aria-label="Remote 配置 JSON" required></textarea>
         </div>
         <div style="margin-top:12px;">
           <button class="btn" type="submit">保存 Remote</button>
@@ -498,20 +523,20 @@
         <div class="form-block">
           <h3>基础信息</h3>
           <div class="row">
-            <input id="name" placeholder="任务名称" required />
-            <select id="mode">
+            <input id="name" placeholder="任务名称" aria-label="任务名称" required />
+            <select id="mode" aria-label="任务模式">
               <option value="sync">sync</option>
               <option value="copy">copy</option>
               <option value="move">move</option>
             </select>
-            <input id="cron" placeholder="Cron (可选，如 0 */10 * * * *)" />
+            <input id="cron" placeholder="Cron (可选，如 0 */10 * * * *)" aria-label="Cron 表达式" />
           </div>
         </div>
         <div class="form-block">
           <h3>数据路径</h3>
           <div class="row">
-            <input id="source" placeholder="source (如 local:/data/src)" required />
-            <input id="destination" placeholder="destination (如 s3prod:bucket/prefix)" required />
+            <input id="source" placeholder="source (如 local:/data/src)" aria-label="源路径" required />
+            <input id="destination" placeholder="destination (如 s3prod:bucket/prefix)" aria-label="目标路径" required />
           </div>
         </div>
         <div class="form-block">
@@ -558,7 +583,7 @@
         <h2 id="adminAuthTitle">管理员安全验证</h2>
       </div>
       <div class="auth-help" id="adminAuthPrompt">执行此操作前，请输入管理员安全密码。</div>
-      <input id="adminAuthInput" type="password" placeholder="管理员安全密码" autocomplete="off" />
+      <input id="adminAuthInput" type="password" placeholder="管理员安全密码" aria-label="管理员安全密码" autocomplete="off" />
       <div class="auth-error" id="adminAuthError"></div>
       <div class="auth-cooldown" id="adminAuthCooldown"></div>
       <div class="auth-actions">
@@ -567,6 +592,7 @@
       </div>
     </div>
   </div>
+  <div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
 
   <script>
     const byId = (id) => document.getElementById(id);
@@ -584,6 +610,8 @@
     const eventBox = byId('events');
     const taskEventHint = byId('taskEventHint');
     const adminGuardStatus = byId('adminGuardStatus');
+    const syncStatus = byId('syncStatus');
+    const toastWrap = byId('toastWrap');
     const remoteModalBackdrop = byId('remoteModalBackdrop');
     const taskModalBackdrop = byId('taskModalBackdrop');
     const adminAuthBackdrop = byId('adminAuthBackdrop');
@@ -601,8 +629,14 @@
     const adminAuthConfirmBtn = byId('adminAuthConfirmBtn');
     const taskActionMenu = byId('taskActionMenu');
     const remoteActionMenu = byId('remoteActionMenu');
+    const taskNameFilterBtn = byId('taskNameFilterBtn');
+    const taskModeFilterBtn = byId('taskModeFilterBtn');
+    const taskStatusFilterBtn = byId('taskStatusFilterBtn');
+    const runsTaskIdFilterBtn = byId('runsTaskIdFilterBtn');
+    const runsStatusFilterBtn = byId('runsStatusFilterBtn');
     const ADMIN_AUTH_TTL_MS = 15 * 60 * 1000;
     const ADMIN_AUTH_COOLDOWN_MS = 3 * 1000;
+    const MAX_TASK_EVENT_LINES = 2000;
     const adminPassword = (() => {
       const fromWindow = window.__FLOWSYNC_UI_CONFIG__?.adminPassword;
       if (typeof fromWindow === 'string' && fromWindow.trim()) return fromWindow;
@@ -630,6 +664,40 @@
     let loadingTaskEventsFor = null;
     let taskEventLines = [];
     let eventsSearchTimer = null;
+    let wsConnected = false;
+    let taskRenderTimer = null;
+    let runsRefreshInterval = null;
+    let tasksRefreshInterval = null;
+    let dashboardRefreshInterval = null;
+    let modalFocusReturnEl = null;
+
+    function setSyncStatus(message) {
+      if (syncStatus) syncStatus.textContent = `连接状态：${message}`;
+    }
+
+    function showToast(message, isError = false) {
+      if (!toastWrap) return;
+      const el = document.createElement('div');
+      el.className = `toast${isError ? ' error' : ''}`;
+      el.textContent = message;
+      toastWrap.appendChild(el);
+      setTimeout(() => {
+        el.remove();
+      }, isError ? 5000 : 2800);
+    }
+
+    function displayError(context, err) {
+      const msg = String(err && err.message ? err.message : err || 'unknown error');
+      showToast(`${context}: ${msg}`, true);
+      console.error(context, err);
+    }
+
+    window.addEventListener('error', (event) => {
+      displayError('页面运行异常', event.error || event.message);
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      displayError('请求失败', event.reason);
+    });
 
     function setGuardStatus(message, isError = false) {
       if (!adminGuardStatus) return;
@@ -649,7 +717,7 @@
     }
 
     function closeAdminAuthModal(result) {
-      adminAuthBackdrop.classList.add('hidden');
+      closeModal(adminAuthBackdrop);
       if (adminCooldownTimer) {
         clearInterval(adminCooldownTimer);
         adminCooldownTimer = null;
@@ -671,8 +739,7 @@
       adminAuthError.textContent = '';
       adminAuthCooldown.textContent = '';
       adminAuthInput.value = '';
-      adminAuthBackdrop.classList.remove('hidden');
-      setTimeout(() => adminAuthInput.focus(), 0);
+      openModal(adminAuthBackdrop, '#adminAuthInput');
       updateAdminCooldownHint();
       if (!adminCooldownTimer) {
         adminCooldownTimer = setInterval(updateAdminCooldownHint, 250);
@@ -815,13 +882,14 @@
     }
 
     function renderTaskEvents() {
+      const isNearBottom = eventBox.scrollHeight - eventBox.scrollTop - eventBox.clientHeight < 18;
       const keyword = (eventsKeyword.value || '').trim().toLowerCase();
       const lines = keyword
         ? taskEventLines.filter((line) => line.toLowerCase().includes(keyword))
         : taskEventLines;
       eventBox.textContent = lines.join('\n');
       if (lines.length > 0) eventBox.textContent += '\n';
-      eventBox.scrollTop = eventBox.scrollHeight;
+      if (isNearBottom) eventBox.scrollTop = eventBox.scrollHeight;
     }
 
     function normalizeEventPayloadForDisplay(obj) {
@@ -838,6 +906,9 @@
       const displayPayload = normalizeEventPayloadForDisplay(obj);
       const line = `[${fmtDateTime(ts)}] ${JSON.stringify(displayPayload)}`;
       taskEventLines.push(line);
+      if (taskEventLines.length > MAX_TASK_EVENT_LINES) {
+        taskEventLines.splice(0, taskEventLines.length - MAX_TASK_EVENT_LINES);
+      }
       renderTaskEvents();
     }
 
@@ -888,23 +959,69 @@
       });
     }
 
+    function textCell(value) {
+      const td = document.createElement('td');
+      td.textContent = value == null ? '' : String(value);
+      return td;
+    }
+
+    function applyTaskStatusCell(td, task) {
+      const effective = statusLabel(task.status, task.enabled);
+      const span = document.createElement('span');
+      span.className = `status-pill ${statusClass(effective)}`;
+      span.textContent = effective;
+      td.textContent = '';
+      td.appendChild(span);
+    }
+
+    function applyTaskProgressCell(td, task) {
+      td.textContent = '';
+      td.appendChild(renderTaskProgressCell(task));
+    }
+
     function renderTasks(tasks) {
-      byId('tasksBody').innerHTML = tasks.map(t => `
-        <tr class="task-row ${selectedTaskId === t.id ? 'active' : ''}" data-task-id="${t.id}" onclick='selectTask(${t.id}, ${JSON.stringify(t.name)})'>
-          <td>${t.id}</td>
-          <td>${t.name}</td>
-          <td>${t.mode}</td>
-          <td>${t.source}</td>
-          <td>${t.destination}</td>
-          <td>${t.cron_expr || ''}</td>
-          <td>${t.enabled ? '是' : '否'}</td>
-          <td><span class="status-pill ${statusClass(statusLabel(t.status, t.enabled))}">${statusLabel(t.status, t.enabled)}</span></td>
-          <td>${renderTaskProgressCell(t)}</td>
-          <td class="actions-cell">
-            <button class="btn secondary action-trigger" onclick="toggleTaskActionMenu(${t.id}, event)">操作 ▾</button>
-          </td>
-        </tr>
-      `).join('');
+      const tbody = byId('tasksBody');
+      tbody.textContent = '';
+      const frag = document.createDocumentFragment();
+      for (const t of tasks) {
+        const tr = document.createElement('tr');
+        tr.className = `task-row${selectedTaskId === t.id ? ' active' : ''}`;
+        tr.dataset.taskId = String(t.id);
+        tr.addEventListener('click', () => selectTask(t.id, t.name));
+
+        tr.appendChild(textCell(t.id));
+        tr.appendChild(textCell(t.name));
+        tr.appendChild(textCell(t.mode));
+        tr.appendChild(textCell(t.source));
+        tr.appendChild(textCell(t.destination));
+        tr.appendChild(textCell(t.cron_expr || ''));
+        tr.appendChild(textCell(t.enabled ? '是' : '否'));
+
+        const statusTd = document.createElement('td');
+        statusTd.dataset.col = 'status';
+        applyTaskStatusCell(statusTd, t);
+        tr.appendChild(statusTd);
+
+        const progressTd = document.createElement('td');
+        progressTd.dataset.col = 'progress';
+        applyTaskProgressCell(progressTd, t);
+        tr.appendChild(progressTd);
+
+        const actionsTd = document.createElement('td');
+        actionsTd.className = 'actions-cell';
+        const actionBtn = document.createElement('button');
+        actionBtn.className = 'btn secondary action-trigger';
+        actionBtn.type = 'button';
+        actionBtn.textContent = '操作 ▾';
+        actionBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          toggleTaskActionMenu(t.id, event);
+        });
+        actionsTd.appendChild(actionBtn);
+        tr.appendChild(actionsTd);
+        frag.appendChild(tr);
+      }
+      tbody.appendChild(frag);
     }
 
     function clampProgress(pct) {
@@ -943,12 +1060,39 @@
 
     function renderTaskProgressCell(task) {
       const d = getTaskProgressDisplay(task);
-      return `
-        <div class="progress-wrap">
-          <div class="progress-track"><div class="progress-fill" style="width:${d.pct.toFixed(1)}%"></div></div>
-          <div class="progress-text">${d.text}</div>
-        </div>
-      `;
+      const wrap = document.createElement('div');
+      wrap.className = 'progress-wrap';
+      const track = document.createElement('div');
+      track.className = 'progress-track';
+      const fill = document.createElement('div');
+      fill.className = 'progress-fill';
+      fill.style.width = `${d.pct.toFixed(1)}%`;
+      const text = document.createElement('div');
+      text.className = 'progress-text';
+      text.textContent = d.text;
+      track.appendChild(fill);
+      wrap.appendChild(track);
+      wrap.appendChild(text);
+      return wrap;
+    }
+
+    function updateTaskRowDisplay(taskId) {
+      const row = document.querySelector(`#tasksBody tr[data-task-id="${taskId}"]`);
+      if (!row) return;
+      const task = latestTasks.find((t) => t.id === taskId);
+      if (!task) return;
+      const progressTd = row.querySelector('td[data-col="progress"]');
+      const statusTd = row.querySelector('td[data-col="status"]');
+      if (statusTd) applyTaskStatusCell(statusTd, task);
+      if (progressTd) applyTaskProgressCell(progressTd, task);
+    }
+
+    function scheduleTaskRender(delayMs = 120) {
+      if (taskRenderTimer) return;
+      taskRenderTimer = setTimeout(() => {
+        taskRenderTimer = null;
+        renderTasks(getFilteredTasks());
+      }, delayMs);
     }
 
     function summarizeRemoteConfig(remote) {
@@ -990,16 +1134,31 @@
     }
 
     function renderRemotes(remotes) {
-      byId('remotesBody').innerHTML = remotes.map(r => `
-        <tr>
-          <td>${r.name}</td>
-          <td>${r.type}</td>
-          <td style="color: var(--muted);">${summarizeRemoteConfig(r)}</td>
-          <td class="actions-cell">
-            <button class="btn secondary action-trigger" onclick='toggleRemoteActionMenu(${JSON.stringify(r.name)}, event)'>操作 ▾</button>
-          </td>
-        </tr>
-      `).join('');
+      const tbody = byId('remotesBody');
+      tbody.textContent = '';
+      const frag = document.createDocumentFragment();
+      for (const r of remotes) {
+        const tr = document.createElement('tr');
+        tr.appendChild(textCell(r.name));
+        tr.appendChild(textCell(r.type));
+        const summaryTd = textCell(summarizeRemoteConfig(r));
+        summaryTd.style.color = 'var(--muted)';
+        tr.appendChild(summaryTd);
+        const actionsTd = document.createElement('td');
+        actionsTd.className = 'actions-cell';
+        const actionBtn = document.createElement('button');
+        actionBtn.className = 'btn secondary action-trigger';
+        actionBtn.type = 'button';
+        actionBtn.textContent = '操作 ▾';
+        actionBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          toggleRemoteActionMenu(r.name, event);
+        });
+        actionsTd.appendChild(actionBtn);
+        tr.appendChild(actionsTd);
+        frag.appendChild(tr);
+      }
+      tbody.appendChild(frag);
     }
 
     function getFilteredRuns() {
@@ -1013,19 +1172,23 @@
     }
 
     function renderRuns(runs) {
-      byId('runsBody').innerHTML = runs.map(r => `
-        <tr>
-          <td>${r.id}</td>
-          <td>${r.task_id}</td>
-          <td>${r.status}</td>
-          <td>${r.trigger_type}</td>
-          <td>${fmtDateTime(r.started_at)}</td>
-          <td>${fmtDateTime(r.ended_at)}</td>
-          <td>${r.copied_files}</td>
-          <td>${r.failed_files}</td>
-          <td>${fmtBytes(r.copied_bytes)}</td>
-        </tr>
-      `).join('');
+      const tbody = byId('runsBody');
+      tbody.textContent = '';
+      const frag = document.createDocumentFragment();
+      for (const r of runs) {
+        const tr = document.createElement('tr');
+        tr.appendChild(textCell(r.id));
+        tr.appendChild(textCell(r.task_id));
+        tr.appendChild(textCell(r.status));
+        tr.appendChild(textCell(r.trigger_type));
+        tr.appendChild(textCell(fmtDateTime(r.started_at)));
+        tr.appendChild(textCell(fmtDateTime(r.ended_at)));
+        tr.appendChild(textCell(r.copied_files));
+        tr.appendChild(textCell(r.failed_files));
+        tr.appendChild(textCell(fmtBytes(r.copied_bytes)));
+        frag.appendChild(tr);
+      }
+      tbody.appendChild(frag);
     }
 
     function refreshTaskNameFilterOptions() {
@@ -1033,9 +1196,14 @@
       const names = Array.from(
         new Set((latestTasks || []).map((t) => String(t.name || '').trim()).filter(Boolean))
       ).sort((a, b) => a.localeCompare(b, 'zh-CN'));
-      optionsEl.innerHTML = names
-        .map((name) => `<option value="${name.replace(/"/g, '&quot;')}"></option>`)
-        .join('');
+      optionsEl.textContent = '';
+      const frag = document.createDocumentFragment();
+      for (const name of names) {
+        const option = document.createElement('option');
+        option.value = name;
+        frag.appendChild(option);
+      }
+      optionsEl.appendChild(frag);
     }
 
     async function refreshTasks() {
@@ -1090,21 +1258,62 @@
       await api(`/api/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
       await refreshRemotes();
     }
-    function openRemoteModal() {
-      remoteModalBackdrop.classList.remove('hidden');
+    function isAnyModalOpen() {
+      return !remoteModalBackdrop.classList.contains('hidden')
+        || !taskModalBackdrop.classList.contains('hidden')
+        || !adminAuthBackdrop.classList.contains('hidden');
+    }
+
+    function openModal(backdrop, focusSelector) {
+      if (!backdrop || !backdrop.classList.contains('hidden')) return;
+      modalFocusReturnEl = document.activeElement;
+      backdrop.classList.remove('hidden');
       document.body.classList.add('modal-open');
+      const target = focusSelector ? backdrop.querySelector(focusSelector) : null;
+      if (target) setTimeout(() => target.focus(), 0);
+    }
+
+    function closeModal(backdrop) {
+      if (!backdrop || backdrop.classList.contains('hidden')) return;
+      backdrop.classList.add('hidden');
+      if (!isAnyModalOpen()) {
+        document.body.classList.remove('modal-open');
+        if (modalFocusReturnEl && typeof modalFocusReturnEl.focus === 'function') {
+          modalFocusReturnEl.focus();
+        }
+      }
+    }
+
+    function trapModalFocus(backdrop, event) {
+      if (backdrop.classList.contains('hidden') || event.key !== 'Tab') return;
+      const modal = backdrop.querySelector('[role="dialog"]');
+      if (!modal) return;
+      const focusable = modal.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+
+    function openRemoteModal() {
+      openModal(remoteModalBackdrop, '#remoteName');
     }
     function closeRemoteModal() {
-      remoteModalBackdrop.classList.add('hidden');
-      document.body.classList.remove('modal-open');
+      closeModal(remoteModalBackdrop);
     }
     function openTaskModal() {
-      taskModalBackdrop.classList.remove('hidden');
-      document.body.classList.add('modal-open');
+      openModal(taskModalBackdrop, '#name');
     }
     function closeTaskModal() {
-      taskModalBackdrop.classList.add('hidden');
-      document.body.classList.remove('modal-open');
+      closeModal(taskModalBackdrop);
     }
     function fillRemoteForm(payload) {
       const data = JSON.parse(decodeURIComponent(payload));
@@ -1190,10 +1399,34 @@
     window.toggleRemoteActionMenu = toggleRemoteActionMenu;
     window.closeAllRemoteActionMenus = closeAllRemoteActionMenus;
 
+    taskActionMenu.addEventListener('click', (event) => event.stopPropagation());
+    remoteActionMenu.addEventListener('click', (event) => event.stopPropagation());
+
     document.addEventListener('click', (e) => {
       if (!e.target.closest('.th-filter')) closeAllFilterPopovers();
       if (!e.target.closest('.actions-cell')) closeAllTaskActionMenus();
       if (!e.target.closest('.actions-cell')) closeAllRemoteActionMenus();
+    });
+    document.addEventListener('keydown', (e) => {
+      trapModalFocus(remoteModalBackdrop, e);
+      trapModalFocus(taskModalBackdrop, e);
+      trapModalFocus(adminAuthBackdrop, e);
+      if (e.key !== 'Escape') return;
+      if (!adminAuthBackdrop.classList.contains('hidden')) {
+        e.preventDefault();
+        closeAdminAuthModal(false);
+        return;
+      }
+      if (!taskModalBackdrop.classList.contains('hidden')) {
+        e.preventDefault();
+        closeTaskModal();
+        resetTaskFormToCreateMode();
+        return;
+      }
+      if (!remoteModalBackdrop.classList.contains('hidden')) {
+        e.preventDefault();
+        closeRemoteModal();
+      }
     });
     window.addEventListener('resize', () => {
       closeAllFilterPopovers();
@@ -1205,6 +1438,12 @@
       closeAllTaskActionMenus();
       closeAllRemoteActionMenus();
     }, true);
+
+    taskNameFilterBtn.addEventListener('click', (event) => toggleFilterPopover('taskNamePopover', event));
+    taskModeFilterBtn.addEventListener('click', (event) => toggleFilterPopover('taskModePopover', event));
+    taskStatusFilterBtn.addEventListener('click', (event) => toggleFilterPopover('taskStatusPopover', event));
+    runsTaskIdFilterBtn.addEventListener('click', (event) => toggleFilterPopover('runsTaskIdPopover', event));
+    runsStatusFilterBtn.addEventListener('click', (event) => toggleFilterPopover('runsStatusPopover', event));
 
     byId('openRemoteModalBtn').addEventListener('click', () => {
       byId('remoteForm').reset();
@@ -1428,22 +1667,30 @@
     function connectWs() {
       const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${protocol}://${location.host}/ws`);
+      ws.onopen = () => {
+        wsConnected = true;
+        setSyncStatus('WebSocket 已连接');
+      };
       ws.onmessage = async (ev) => {
         try {
           const payload = JSON.parse(ev.data);
           const taskId = Number(payload.task_id);
+          const eventType = String(payload.event || '');
+          let shouldRefreshOverview = false;
           if (Number.isFinite(taskId)) {
-            if (payload.event === 'task_started') {
+            if (eventType === 'task_started') {
               setTaskProgress(taskId, {
                 progress_pct: 0,
                 completed_bytes: 0,
                 total_bytes: 0,
               });
-            } else if (payload.event === 'task_planned') {
+              shouldRefreshOverview = true;
+            } else if (eventType === 'task_planned') {
               setTaskProgress(taskId, {
                 total_bytes: Number(payload.total_bytes || 0),
               });
-            } else if (payload.event === 'task_progress') {
+              updateTaskRowDisplay(taskId);
+            } else if (eventType === 'task_progress') {
               const totalBytes = Number(payload.total_bytes || 0);
               const completedBytes = Number(payload.completed_bytes || 0);
               const pct = Number.isFinite(Number(payload.progress_pct))
@@ -1454,44 +1701,66 @@
                 completed_bytes: completedBytes,
                 total_bytes: totalBytes,
               });
-            } else if (payload.event === 'task_completed') {
+              updateTaskRowDisplay(taskId);
+            } else if (eventType === 'task_completed') {
               const isSuccess = String(payload.status || '') === 'success';
               setTaskProgress(taskId, {
                 progress_pct: isSuccess ? 100 : clampProgress((taskProgressMap.get(taskId) || {}).progress_pct),
               });
+              shouldRefreshOverview = true;
             }
           }
           if (selectedTaskId != null && Number(payload.task_id) === selectedTaskId) {
             appendTaskEvent(payload);
           }
-          renderTasks(getFilteredTasks());
-          if (payload.event === 'task_completed' || payload.event === 'task_started') {
-            await refreshRuns();
-            await refreshDashboard();
-            await refreshTasks();
+          if (shouldRefreshOverview) {
+            await Promise.all([
+              refreshRuns(),
+              refreshDashboard(),
+              refreshTasks(),
+            ]);
+            scheduleTaskRender(10);
           }
         } catch (error) {
-          console.error('ws message parse failed', error, ev.data);
+          displayError('WebSocket 消息解析失败', error);
         }
       };
-      ws.onclose = () => setTimeout(connectWs, 1500);
+      ws.onclose = () => {
+        wsConnected = false;
+        setSyncStatus('WebSocket 断开，已切换到轮询模式');
+        setTimeout(connectWs, 1500);
+      };
+      ws.onerror = () => {
+        setSyncStatus('WebSocket 错误，等待重连');
+      };
     }
 
     async function boot() {
       if (!adminPassword) {
         setGuardStatus('当前未配置管理员安全密码，敏感配置查看与高危写操作已禁用。', true);
       }
-      await refreshRemotes();
-      await refreshTasks();
-      await refreshRuns();
-      await refreshDashboard();
+      setSyncStatus('初始化中');
+      await Promise.all([
+        refreshRemotes(),
+        refreshTasks(),
+        refreshRuns(),
+        refreshDashboard(),
+      ]);
       updateTaskEventHint();
       connectWs();
-      setInterval(refreshDashboard, 5000);
-      setInterval(refreshRuns, 8000);
-      setInterval(refreshTasks, 8000);
+      dashboardRefreshInterval = setInterval(() => {
+        refreshDashboard().catch((err) => displayError('刷新仪表盘失败', err));
+      }, 10000);
+      runsRefreshInterval = setInterval(() => {
+        if (wsConnected) return;
+        refreshRuns().catch((err) => displayError('刷新审计日志失败', err));
+      }, 8000);
+      tasksRefreshInterval = setInterval(() => {
+        if (wsConnected) return;
+        refreshTasks().catch((err) => displayError('刷新任务列表失败', err));
+      }, 8000);
     }
-    boot().catch((e) => console.error(e));
+    boot().catch((e) => displayError('初始化失败', e));
   </script>
 </body>
 </html>
