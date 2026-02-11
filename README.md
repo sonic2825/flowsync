@@ -196,6 +196,24 @@ cargo run -- server \
 - `GET /api/dashboard`
 - `GET /ws`
 
+### Cron 定时任务说明
+
+FlowSync 的任务调度基于 `tokio-cron-scheduler`，任务中的 `cron_expr` 使用 Cron 表达式。
+
+常用 6 段格式：
+- `秒 分 时 日 月 周`
+
+示例：
+- `0 */10 * * * *`：每 10 分钟执行一次
+- `0 0 * * * *`：每小时整点执行
+- `0 30 2 * * *`：每天 `02:30` 执行
+- `0 0 3 * * 1`：每周一 `03:00` 执行
+
+使用建议：
+- 先手动运行一次任务确认 `source/destination` 正确，再开启定时调度
+- 对 `sync` / `move` 建议先用 `dry_run` 验证，确认无误后再关闭
+- 高并发任务避免同一时间密集触发，建议错峰设置 `cron_expr`
+
 ## 测试
 
 单元/集成（Rust）：
