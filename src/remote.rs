@@ -136,10 +136,21 @@ pub fn build_operator(cfg: &AppConfig, remote_name: &str) -> Result<Operator> {
         RemoteConfig::Sftp {
             endpoint,
             user,
-            password: _,
+            password,
             key,
             root,
         } => {
+            if password
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|v| !v.is_empty())
+            {
+                return Err(anyhow!(
+                    "sftp remote `{}` configured password, but this OpenDAL build doesn't support password auth; use key or SSH agent",
+                    remote_name
+                ));
+            }
+
             let mut builder = services::Sftp::default().endpoint(endpoint);
             if let Some(user) = user {
                 builder = builder.user(user);

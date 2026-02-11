@@ -321,9 +321,8 @@
               <th class="th-filter">
                 <span class="th-filter-head">名称 <button class="filter-trigger" type="button" onclick="toggleFilterPopover('taskNamePopover', event)">▾</button></span>
                 <div class="filter-popover" id="taskNamePopover">
-                  <select id="taskNameFilter">
-                    <option value="">名称: 全部</option>
-                  </select>
+                  <input id="taskNameFilter" list="taskNameOptions" placeholder="名称关键词（留空=全部）" />
+                  <datalist id="taskNameOptions"></datalist>
                 </div>
               </th>
               <th class="th-filter">
@@ -518,6 +517,12 @@
       while (x >= 1024 && i < units.length - 1) { x /= 1024; i++; }
       return `${x.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
     };
+    const fmtDateTime = (value) => {
+      if (!value) return '';
+      const d = new Date(value);
+      if (Number.isNaN(d.getTime())) return String(value);
+      return d.toLocaleString('zh-CN', { hour12: false });
+    };
     const eventBox = byId('events');
     const taskEventHint = byId('taskEventHint');
     const remoteModalBackdrop = byId('remoteModalBackdrop');
@@ -667,9 +672,19 @@
       eventBox.scrollTop = eventBox.scrollHeight;
     }
 
+    function normalizeEventPayloadForDisplay(obj) {
+      if (!obj || typeof obj !== 'object') return obj;
+      const out = { ...obj };
+      if (out.at) out.at = fmtDateTime(out.at);
+      if (out.created_at) out.created_at = fmtDateTime(out.created_at);
+      return out;
+    }
+
     function appendTaskEvent(obj) {
       if (selectedTaskId == null) return;
-      const line = `[${new Date().toLocaleTimeString()}] ${JSON.stringify(obj)}`;
+      const ts = obj?.at || obj?.created_at || Date.now();
+      const displayPayload = normalizeEventPayloadForDisplay(obj);
+      const line = `[${fmtDateTime(ts)}] ${JSON.stringify(displayPayload)}`;
       taskEventLines.push(line);
       renderTaskEvents();
     }
@@ -684,8 +699,8 @@
       if (loadingTaskEventsFor !== taskId || selectedTaskId !== taskId) return;
       taskEventLines = [];
       for (const record of events) {
-        const payload = record.payload || { event: record.event_type };
-        const line = `[${new Date(record.created_at || Date.now()).toLocaleTimeString()}] ${JSON.stringify(payload)}`;
+        const payload = normalizeEventPayloadForDisplay(record.payload || { event: record.event_type });
+        const line = `[${fmtDateTime(record.created_at || Date.now())}] ${JSON.stringify(payload)}`;
         taskEventLines.push(line);
       }
       renderTaskEvents();
@@ -703,18 +718,18 @@
         tr.classList.toggle('active', Number(tr.dataset.taskId) === id);
       });
       loadTaskEventHistory(id).catch((e) => {
-        taskEventLines = [`[${new Date().toLocaleTimeString()}] 加载历史事件失败: ${String(e)}`];
+        taskEventLines = [`[${fmtDateTime(Date.now())}] 加载历史事件失败: ${String(e)}`];
         renderTaskEvents();
       });
     }
 
     function getFilteredTasks() {
-      const name = taskNameFilter.value;
+      const nameKeyword = (taskNameFilter.value || '').trim().toLowerCase();
       const mode = taskModeFilter.value;
       const status = taskStatusFilter.value;
       return latestTasks.filter((t) => {
         const effectiveStatus = statusLabel(t.status, t.enabled);
-        if (name && t.name !== name) return false;
+        if (nameKeyword && !String(t.name || '').toLowerCase().includes(nameKeyword)) return false;
         if (mode && t.mode !== mode) return false;
         if (status && effectiveStatus !== status) return false;
         return true;
@@ -814,8 +829,8 @@
           <td>${r.task_id}</td>
           <td>${r.status}</td>
           <td>${r.trigger_type}</td>
-          <td>${r.started_at}</td>
-          <td>${r.ended_at || ''}</td>
+          <td>${fmtDateTime(r.started_at)}</td>
+          <td>${fmtDateTime(r.ended_at)}</td>
           <td>${r.copied_files}</td>
           <td>${r.failed_files}</td>
           <td>${fmtBytes(r.copied_bytes)}</td>
@@ -824,14 +839,13 @@
     }
 
     function refreshTaskNameFilterOptions() {
-      const selectedName = taskNameFilter.value;
-      const names = Array.from(new Set((latestTasks || []).map((t) => String(t.name || '').trim()).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'zh-CN'));
-      taskNameFilter.innerHTML = `<option value="">名称: 全部</option>${names.map((name) => `<option value="${name.replace(/"/g, '&quot;')}">${name}</option>`).join('')}`;
-      if (selectedName && names.includes(selectedName)) {
-        taskNameFilter.value = selectedName;
-      } else {
-        taskNameFilter.value = '';
-      }
+      const optionsEl = byId('taskNameOptions');
+      const names = Array.from(
+        new Set((latestTasks || []).map((t) => String(t.name || '').trim()).filter(Boolean))
+      ).sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      optionsEl.innerHTML = names
+        .map((name) => `<option value="${name.replace(/"/g, '&quot;')}"></option>`)
+        .join('');
     }
 
     async function refreshTasks() {
@@ -1161,7 +1175,7 @@
       await refreshRuns();
     });
 
-    taskNameFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
+    taskNameFilter.addEventListener('input', () => renderTasks(getFilteredTasks()));
     taskModeFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
     taskStatusFilter.addEventListener('change', () => renderTasks(getFilteredTasks()));
     runsStatusFilter.addEventListener('change', () => renderRuns(getFilteredRuns()));
@@ -1172,7 +1186,7 @@
       eventsSearchTimer = setTimeout(() => {
         if (selectedTaskId != null) {
           loadTaskEventHistory(selectedTaskId).catch((e) => {
-            taskEventLines = [`[${new Date().toLocaleTimeString()}] 搜索事件失败: ${String(e)}`];
+            taskEventLines = [`[${fmtDateTime(Date.now())}] 搜索事件失败: ${String(e)}`];
             renderTaskEvents();
           });
         }
