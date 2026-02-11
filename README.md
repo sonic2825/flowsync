@@ -1,465 +1,121 @@
 # FlowSync
 
-基于 Rust + OpenDAL 的多后端文件同步 CLI 工具。
+基于 Rust + OpenDAL 的多后端文件复制/同步工具，提供：
+- CLI：`copy` / `sync` / `move` / `ls` / `config init`
+- Web 管理端：任务管理、调度执行、运行历史、实时事件
 
-## 已实现能力
+## 功能概览
 
-- 后端：`fs`、`s3`、`sftp`（`ftp` 配置保留，但当前构建未启用）
-- 命令：`copy`、`sync`、`move`、`ls`、`config init`
+- 存储后端：`fs`、`s3`、`sftp`
 - 差异检测：
-  - 默认 `size + mtime`
-  - `--checksum` 启用 SHA256
-  - `--ignore-existing` 跳过目标已存在文件
-- 并发：
-  - `--transfers` 控制并发传输
-  - `--checkers` 控制差异检查并发（尤其在 `--checksum` 时）
-  - `--chunk-size` 控制单文件流式分块大小（默认 `8MB`）
-- 可观测性：
-  - `indicatif` 总进度条
-  - `--log-level` 日志级别
-  - 失败写入 `transfer_failures.log`
-- 可靠性：
-  - 读写/删除操作指数退避重试
-- 安全执行：
-  - `--dry-run` 仅输出计划操作
+  - 默认：`size + mtime`
+  - `--checksum`：使用 SHA256
+  - `--ignore-existing`：目标存在即跳过
+- 传输控制：
+  - `--transfers`：传输并发
+  - `--checkers`：差异检查并发
+  - `--chunk-size`：流式分块大小（默认 `8MB`）
+  - `--bandwidth-limit`：限速
+- 安全执行：`--dry-run` 仅输出计划动作，不执行写入/删除
+- 失败记录：失败项会写入 `transfer_failures.log`
+- Web 端能力：任务 CRUD、Cron 调度、运行日志、实时事件（WebSocket）
 
-## 构建
+## 安装与构建
 
 ```bash
 cargo build
 ```
 
-## 快速开始
+## 快速开始（CLI）
 
-1) 初始化配置：
+1) 初始化配置（交互式）：
 
 ```bash
 cargo run -- config init
 ```
 
-2) 复制：
+2) 复制（仅新增/覆盖，不删除目标多余文件）：
 
 ```bash
-cargo run -- copy local:/data/src s3prod:prefix
+cargo run -- copy local:/data/src s3prod:backup
 ```
 
 3) 同步（目标镜像源，包含删除）：
 
 ```bash
-cargo run -- sync local:/data/src s3prod:prefix --dry-run
+cargo run -- sync local:/data/src s3prod:backup --dry-run
 ```
 
-4) 移动（复制后删源）：
+4) 搬运（复制后删除源）：
 
 ```bash
-cargo run -- move local:/data/src s3prod:prefix
+cargo run -- move local:/data/src s3prod:archive
 ```
 
-5) 列表：
+5) 列目录（用于连通性和路径验证）：
 
 ```bash
-cargo run -- ls s3prod:prefix
+cargo run -- ls s3prod:backup
 ```
 
-6) 启动 Web 管理后台与任务调度：
+## 命令语义
 
-```bash
-cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
-```
+- `copy`：复制新增/变更文件，不删除目标文件
+- `sync`：让目标与源一致，会删除目标中源不存在的文件
+- `move`：先复制，再删除源文件
+- `ls`：列出 `remote:path` 下的对象
+- `config init`：交互式写入配置文件
 
-可选事件回放清理策略参数（默认开启）：
-
-```bash
-cargo run -- server \
-  --host 127.0.0.1 \
-  --port 3030 \
-  --db flowsync.db \
-  --event-retention-days 7 \
-  --event-max-rows 200000 \
-  --event-cleanup-interval-secs 300
-```
-
-- `--event-retention-days`：按天清理历史事件（`0` 表示不按天清理）
-- `--event-max-rows`：事件表最大行数（超出删最早；`0` 表示不按行数清理）
-- `--event-cleanup-interval-secs`：后台清理周期秒数（最小 30 秒）
-
-打开浏览器访问：`http://127.0.0.1:3030`
-
-## 命令详解
-
-以下命令均使用 `remote:path` 定位数据源和目标（例如 `local:docs`、`s3prod:prefix` 或 `s3dyn:bucket/prefix`）。
-
-### `copy`
-
-- 作用：把源文件复制到目标；只会新增/覆盖目标，不会删除目标中多余文件
-- 适合：一次性拷贝、增量补齐、低风险同步
-- 示例：
-
-```bash
-cargo run -- copy local:/data/src s3prod:prefix
-```
-
-### `sync`
-
-- 作用：让目标“镜像”源；会复制新增/变更文件，也会删除目标中源端不存在的文件
-- 适合：双端严格一致场景
-- 风险：会删除目标文件，建议先 `--dry-run`
-- 示例：
-
-```bash
-cargo run -- --dry-run sync local:/data/src s3prod:prefix
-```
-
-### `move`
-
-- 作用：先复制，再删除源端对应文件（等价“搬运”）
-- 适合：归档迁移、落盘后清理源目录
-- 风险：源文件会被删除，建议先用 `copy` 或 `--dry-run` 验证
-- 示例：
-
-```bash
-cargo run -- move local:/data/src s3prod:prefix
-```
-
-### `ls`
-
-- 作用：列出指定位置下的文件/目录信息（用于连通性和路径验证）
-- 适合：正式同步前确认 remote 配置、路径是否正确
-- 示例：
-
-```bash
-cargo run -- ls s3prod:prefix
-```
-
-### `config init`
-
-- 作用：交互式初始化本地配置文件（默认 `~/.config/flowsync/config.toml`）
-- 适合：首次使用时快速生成 remotes 配置
-- 说明：Web 端也可管理 remotes；执行任务时优先读取数据库中的 remotes
-- 示例：
-
-```bash
-cargo run -- config init
-```
-
-### 选择建议
-
-- 想“只增不删”：用 `copy`
-- 想“目标完全对齐源”：用 `sync`
-- 想“搬走并清理源”：用 `move`
-- 想“先检查路径与权限”：先跑 `ls` + `--dry-run`
-
-## 全局参数说明
-
-以下参数适用于 `copy` / `sync` / `move`（`--log-level` 为全局参数）：
+## 全局参数（适用于 `copy/sync/move`）
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
-| `--log-level <LEVEL>` | `info` | 日志级别（如 `trace`/`debug`/`info`/`warn`/`error`） |
-| `--transfers <N>` | `4` | 传输并发数（实际复制/写入并发） |
-| `--checkers <N>` | `8` | 差异检查并发数（决定是否需要复制的检查阶段） |
-| `--chunk-size <SIZE>` | `8MB` | 单文件流式读写/哈希分块大小，支持 `KB/MB/GB` 与 `KiB/MiB/GiB` |
-| `--dry-run` | `false` | 仅打印计划动作，不执行写入/删除 |
-| `--include <GLOB>` | 空 | 仅包含匹配的相对路径，可重复传入 |
-| `--exclude <GLOB>` | 空 | 排除匹配的相对路径，可重复传入 |
-| `--bandwidth-limit <RATE>` | 不限速 | 限速，支持 `KB/MB/GB`（如 `50MB`） |
-| `--checksum` | `false` | 使用 SHA256 比较源/目标内容（更准确，通常更慢） |
-| `--ignore-existing` | `false` | 目标存在即跳过，不再比较内容 |
+| `--log-level <LEVEL>` | `info` | 日志级别（`trace/debug/info/warn/error`） |
+| `--transfers <N>` | `4` | 传输并发 |
+| `--checkers <N>` | `8` | 差异检查并发 |
+| `--dry-run` | `false` | 仅显示计划动作 |
+| `--include <GLOB>` | 空 | 包含匹配路径（可重复） |
+| `--exclude <GLOB>` | 空 | 排除匹配路径（可重复） |
+| `--bandwidth-limit <RATE>` | 不限速 | 限速（如 `50MB`） |
+| `--chunk-size <SIZE>` | `8MB` | 分块大小（支持 `KB/MB/GB`、`KiB/MiB/GiB`） |
+| `--checksum` | `false` | 使用 SHA256 对比 |
+| `--ignore-existing` | `false` | 目标已存在则跳过 |
 
-### 对比规则（是否复制）
-
-- 默认：按 `size + mtime` 判断。
-- 开启 `--checksum`：按 SHA256 判断（会额外读取源与目标文件）。
-- 开启 `--ignore-existing`：目标存在即跳过，优先于内容比较。
-
-### `--chunk-size` 调优建议
-
-- 默认 `8MB` 适合大多数 S3/对象存储场景。
-- 内存紧张或高并发任务较多：可降到 `4MB`~`8MB`。
-- 大文件、高吞吐网络：可尝试 `16MB`~`32MB`（通常更高吞吐，但会增加内存占用）。
-
-## 参数使用示例
-
-1) 高并发复制（网络和目标端可承受时）：
+示例：
 
 ```bash
-cargo run -- --transfers 32 --checkers 32 copy local:/data/src s3prod:prefix
+# 高并发复制
+cargo run -- copy local:/data/src s3prod:backup --transfers 16 --checkers 16
+
+# 严格校验同步
+cargo run -- sync local:/data/src s3prod:backup --checksum --checkers 16
+
+# 限速同步
+cargo run -- sync local:/data/src s3prod:backup --bandwidth-limit 100MB
 ```
 
-2) 只看计划，不真正执行：
+## Remote 与路径格式
 
-```bash
-cargo run -- --dry-run sync local:/data/src s3prod:prefix
-```
+所有源/目标都使用 `remote:path` 格式，例如：
+- `local:docs/a.txt`
+- `s3prod:images/2026/`
 
-3) 用 checksum 做严格增量同步：
+### S3 路径规则
 
-```bash
-cargo run -- --checksum --checkers 16 sync local:/data/src s3prod:prefix
-```
-
-4) 限速同步（避免占满链路）：
-
-```bash
-cargo run -- --transfers 16 --bandwidth-limit 100MB sync local:/data/src s3prod:prefix
-```
-
-5) 调整单文件分块大小（大文件场景）：
-
-```bash
-cargo run -- --transfers 8 --chunk-size 16MB sync local:/data/src s3prod:prefix
-```
-
-6) 只同步指定目录并排除临时文件：
-
-```bash
-cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync local:/data/src s3prod:prefix
-```
-
-## Web 管理后台与任务调度
-
-- 技术栈：`axum` + `SQLite(rusqlite)` + `tokio-cron-scheduler` + `WebSocket`
-- 前端：单页管理界面（内嵌到二进制，启动 `server` 子命令即提供）
-- 数据持久化：远端配置（remotes）、任务配置、执行历史、错误记录存储在 `--db` 指定的 SQLite 文件
-
-### Remotes（后端存储配置）管理
-
-- 支持类型：`fs`、`s3`、`sftp`、`ftp`（注意：当前构建下 `ftp` 后端未启用，配置可保存但执行会报错）
-- 存储位置：Web 配置保存到 SQLite 的 `remotes` 表
-- 生效优先级：任务执行时优先使用 SQLite 中的 remotes；若与 `config.toml` 同名，SQLite 配置会覆盖本地配置
-- 页面入口：
-  - 在「后端存储配置（Remotes）」卡片点击「新建 / 编辑 Remote」打开弹窗
-  - 在列表中点击「编辑」会将该 Remote 回填到弹窗
-  - 点击「删除」会删除该名称 Remote
-
-#### 弹窗字段说明
-
-- `remote 名称`：任务中引用的别名（例如 `local`、`s3prod`），后续在 `source/destination` 中以 `remote:path` 使用
-- `类型(type)`：`fs` / `s3` / `sftp` / `ftp`
-- `config_json`：JSON 对象，不要包含 `type` 字段（类型由下拉框决定）
-
-#### config_json 示例
-
-1) `fs`（本地文件系统）
-
-```json
-{
-  "root": "/data/sync"
-}
-```
-
-2) `s3`
-
-```json
-{
-  "bucket": "my-bucket",
-  "endpoint": "https://s3.us-east-1.amazonaws.com",
-  "region": "us-east-1",
-  "url_style": "path",
-  "root": ""
-}
-```
-
-2.1) `s3`（不在 Remote 固定 bucket，任务里动态指定）
-
-```json
-{
-  "bucket": "",
-  "endpoint": "https://s3.us-east-1.amazonaws.com",
-  "region": "us-east-1",
-  "url_style": "path",
-  "root": ""
-}
-```
-
-3) `sftp`
-
-```json
-{
-  "endpoint": "ssh://user@example.com:22",
-  "user": "user",
-  "key": "/home/user/.ssh/id_rsa",
-  "root": "/data"
-}
-```
-
-4) `ftp`（仅配置示例）
-
-```json
-{
-  "endpoint": "ftp://example.com:21",
-  "user": "user",
-  "password": "pass",
-  "root": "/"
-}
-```
-
-#### `fs` 类型在 Windows / Linux 的区别
-
-- Linux/macOS：使用 Unix 路径
-
-```json
-{
-  "root": "/Users/td/script/flowsync/test"
-}
-```
-
-- Windows：推荐正斜杠写法（避免转义）
-
-```json
-{
-  "root": "D:/sync-data"
-}
-```
-
-- Windows 也可用反斜杠，但 JSON 需转义
-
-```json
-{
-  "root": "D:\\sync-data"
-}
-```
-
-说明：
-- `root` 是运行 `flowsync` 进程所在机器的本地路径，不是浏览器客户端机器路径
-- 你给出的配置是有效的：
-
-```json
-{
-  "root": "/Users/td/script/flowsync/test/"
-}
-```
-
-#### 任务里如何引用 Remote
-
-- `source` / `destination` 必须使用 `remote:path` 格式
-- 若 Remote 的 `s3.bucket` 已配置：`path` 是 bucket 内前缀（例如 `s3prod:docs/a.txt`）
-- 若 Remote 的 `s3.bucket` 为空：`path` 必须写成 `bucket/前缀`（例如 `s3dyn:my-bucket/docs/a.txt`）
-- `path` 部分会去掉开头的 `/` 再拼接到对应后端 `root` 下
-- 建议把 `path` 写成相对路径（如 `local:subdir/file.txt`），避免路径歧义
-
-#### 常见错误
-
-- `invalid location, expected remote:path`：`source/destination` 没有 `:` 分隔
-- `remote '<name>' not found in config`：任务引用了不存在的 remote 名称
-- `s3 remote '<name>' requires bucket in 'remote:bucket/path' when remote bucket is empty`：该 S3 Remote 未配置 bucket，任务 path 也没带 bucket
-- `config_json must be object`：`config_json` 不是 JSON 对象（例如传了字符串或数组）
-
-#### 从零到可用（最短实操示例）
-
-目标：把本机目录 `/Users/td/script/flowsync/test/src` 同步到 `/Users/td/script/flowsync/test/dst`。
-
-1) 启动服务
-
-```bash
-cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
-```
-
-浏览器打开：`http://127.0.0.1:3030`
-
-2) 在 Web 配置两个 `fs` Remote
-
-- Remote A（源）：
-  - 名称：`local_src`
-  - 类型：`fs`
-  - `config_json`：
-
-```json
-{
-  "root": "/Users/td/script/flowsync/test/src"
-}
-```
-
-- Remote B（目标）：
-  - 名称：`local_dst`
-  - 类型：`fs`
-  - `config_json`：
-
-```json
-{
-  "root": "/Users/td/script/flowsync/test/dst"
-}
-```
-
-3) 创建任务并运行
-
-- 点击「任务列表」右上角「创建任务」
-- 填写：
-  - 任务名：`sync-local-demo`
-  - 模式：`sync`
-  - source：`local_src:`
-  - destination：`local_dst:`
-  - 执行参数：`并发传输数` / `并发检查数` / `流式分块大小(默认 8MB)`
-  - 启用调度：先不勾（或 cron 留空）
-- 提交后在任务列表点击「立即运行」
-
-4) 验证结果
-
-- 观察「实时事件」与「审计日志」是否成功
-- 检查目标目录是否已有同步文件：
-
-```bash
-ls -la /Users/td/script/flowsync/test/dst
-```
-
-可选：
-- 首次建议先用 `copy` 或勾选 `dry-run` 做验证，再切换到 `sync`
-- Windows 用户将 `root` 换成类似 `D:/sync-demo/src`、`D:/sync-demo/dst`
-
-### 后端 API（核心）
-
-- `GET /api/remotes`：远端配置列表
-- `POST /api/remotes`：创建远端配置
-- `PUT /api/remotes/:name`：更新远端配置
-- `DELETE /api/remotes/:name`：删除远端配置
-- `GET /api/tasks`：任务列表
-- `POST /api/tasks`：创建任务
-- `PUT /api/tasks/:id`：编辑任务
-- `DELETE /api/tasks/:id`：删除任务
-- `POST /api/tasks/:id/run`：立即运行
-- `POST /api/tasks/:id/pause`：暂停调度
-- `POST /api/tasks/:id/resume`：恢复调度
-- `GET /api/runs?task_id=<id>&limit=50`：执行历史
-- `GET /api/events?task_id=<id>&limit=300`：任务事件回放（或用 `run_id` 查询）
-- `GET /api/dashboard`：仪表盘数据（CPU/内存、今日流量、运行任务数）
-- `GET /ws`：实时任务进度与错误事件
-
-### Cron 规则说明
-
-- 使用 `tokio-cron-scheduler` 的 cron 表达式，常见 6 段格式示例：
-  - `0 */10 * * * *`：每 10 分钟
-  - `0 0 * * * *`：每小时整点
-  - `0 30 2 * * *`：每天 02:30
-
-## MinIO 端到端测试
-
-项目内置了基于 Docker + MinIO 的 E2E 脚本，会自动验证 `copy/sync/move/ls`：
-
-```bash
-./scripts/e2e_minio.sh
-```
-
-脚本会自动：
-- 启动 MinIO（`127.0.0.1:9000`，控制台 `127.0.0.1:9001`）
-- 创建测试桶
-- 生成测试数据与临时配置
-- 执行并校验 `copy`、`sync --dry-run`、`sync`、`move`
-
-依赖：`docker`、`cargo`、`curl`
-
-说明：
-- 默认 `KEEP_MINIO_UP=1`，测试通过后 MinIO 不会自动关闭，方便登录控制台验证
-- 如需测试结束自动清理容器：
-
-```bash
-KEEP_MINIO_UP=0 ./scripts/e2e_minio.sh
-```
+- 若 remote 已配置 `bucket`：`path` 仅表示 bucket 内前缀
+- 若 remote 未配置 `bucket`：任务路径必须写成 `remote:bucket/prefix`
 
 ## 配置文件
 
-默认路径：`~/.config/flowsync/config.toml`  
-可通过环境变量覆盖：`FLOWSYNC_CONFIG=/path/to/config.toml`  
-兼容旧变量：`RUST_S3_SYNC_CONFIG`（仅用于平滑迁移，建议切换到 `FLOWSYNC_CONFIG`）
+默认路径：
+- `~/.config/flowsync/config.toml`
+
+环境变量覆盖：
+- `FLOWSYNC_CONFIG=/path/to/config.toml`
+- 兼容旧变量：`RUST_S3_SYNC_CONFIG`
+
+兼容行为：
+- 若 `~/.config/flowsync/config.toml` 不存在，但 `~/.config/rust-s3-sync/config.toml` 存在，会自动读取旧路径
 
 示例：
 
@@ -475,20 +131,103 @@ endpoint = "https://s3.us-east-1.amazonaws.com"
 region = "us-east-1"
 url_style = "path" # path | virtual_hosted
 root = ""
-# access_key_id / secret_access_key 可不写，走环境变量 AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
 
 [remotes.s3dyn]
 type = "s3"
-bucket = "" # 或不写该字段；任务里用 s3dyn:bucket/prefix 指定 bucket
+bucket = "" # 或省略；使用时写成 s3dyn:bucket/prefix
 endpoint = "https://s3.us-east-1.amazonaws.com"
 region = "us-east-1"
 url_style = "path"
-root = ""
 
 [remotes.sftp1]
 type = "sftp"
 endpoint = "ssh://user@example.com:22"
 user = "user"
-key = "/Users/td/.ssh/id_rsa"
+key = "/home/user/.ssh/id_rsa"
 root = "/data"
 ```
+
+说明：
+- 当前构建只启用 `fs/s3/sftp`（未启用 `ftp` 运行时）
+- S3 认证可通过配置字段，或环境变量 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+
+## Web 管理端
+
+启动服务：
+
+```bash
+cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
+```
+
+浏览器访问：
+- `http://127.0.0.1:3030`
+
+事件清理参数（可选）：
+
+```bash
+cargo run -- server \
+  --host 127.0.0.1 \
+  --port 3030 \
+  --db flowsync.db \
+  --event-retention-days 7 \
+  --event-max-rows 200000 \
+  --event-cleanup-interval-secs 300
+```
+
+- `--event-retention-days`：按天清理历史事件（`0` 表示关闭）
+- `--event-max-rows`：最大事件行数（`0` 表示关闭）
+- `--event-cleanup-interval-secs`：清理周期秒数（建议 `>=30`）
+
+### 主要 API
+
+- `GET /api/remotes`
+- `POST /api/remotes`
+- `PUT /api/remotes/:name`
+- `DELETE /api/remotes/:name`
+- `GET /api/tasks`
+- `POST /api/tasks`
+- `PUT /api/tasks/:id`
+- `DELETE /api/tasks/:id`
+- `POST /api/tasks/:id/run`
+- `POST /api/tasks/:id/pause`
+- `POST /api/tasks/:id/resume`
+- `GET /api/runs?task_id=<id>&limit=50`
+- `GET /api/events?task_id=<id>&limit=300`
+- `GET /api/dashboard`
+- `GET /ws`
+
+## 测试
+
+单元/集成（Rust）：
+
+```bash
+cargo test
+```
+
+格式与静态检查：
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+```
+
+E2E 脚本（S3 端到端验证 `copy/sync/move/ls`）：
+
+```bash
+bash scripts/e2e_minio.sh
+```
+
+该脚本不会自动启动 Docker MinIO，默认连接以下端点（可用环境变量覆盖）：
+- `S3_ENDPOINT=http://rustfs1.pops.metax-tech.com`
+- `S3_BUCKET=test1`
+- `S3_ACCESS_KEY_ID=rustfsadmin`
+- `S3_SECRET_ACCESS_KEY=rustfsadmin`
+
+常用变量：
+- `KEEP_E2E_ARTIFACTS=1`：保留 `.tmp/e2e` 中间产物
+
+## 安全提示
+
+- `sync`、`move` 都可能删除数据，建议先执行 `--dry-run`
+- 不要提交真实密钥到 `config.toml` 或数据库文件
+- 生产任务建议先用小目录压测，确认并发与 `chunk-size` 设置

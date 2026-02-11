@@ -21,7 +21,7 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{
     broadcast,
-    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    mpsc::{channel, Receiver, Sender},
     Mutex,
 };
 use tokio_cron_scheduler::{Job, JobScheduler};
@@ -34,6 +34,9 @@ use crate::engine::{
     SyncMode, SyncOptions, TransferEvent,
 };
 use crate::remote::{resolve_location_and_operator, Location};
+
+const TASK_EVENT_QUEUE_CAPACITY: usize = 5000;
+static DROPPED_TASK_EVENTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
@@ -715,7 +718,7 @@ struct AppState {
     scheduled_jobs: Arc<Mutex<HashMap<i64, Uuid>>>,
     running_tasks: Arc<Mutex<HashSet<i64>>>,
     ws_tx: broadcast::Sender<String>,
-    event_tx: UnboundedSender<TaskEventWrite>,
+    event_tx: Sender<TaskEventWrite>,
     system: Arc<Mutex<System>>,
 }
 
@@ -1011,7 +1014,7 @@ pub async fn run_server(
         .await
         .context("create scheduler failed")?;
     let (ws_tx, _) = broadcast::channel(1024);
-    let (event_tx, event_rx) = unbounded_channel::<TaskEventWrite>();
+    let (event_tx, event_rx) = channel::<TaskEventWrite>(TASK_EVENT_QUEUE_CAPACITY);
 
     let state = Arc::new(AppState {
         db: db.clone(),
@@ -1561,7 +1564,7 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
         }
     });
 
-    let result = async {
+    let transfer_result = async {
         let cfg = state
             .db
             .load_app_config()
@@ -1606,70 +1609,84 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
         .map(|g| g.clone())
         .unwrap_or_else(|_| Vec::new());
 
-    match &result {
-        Ok(_) => {
-            state
-                .db
-                .finish_run(
-                    run_id,
-                    "success",
-                    copied_files_val,
-                    failed_files_val,
-                    copied_bytes_val,
-                    None,
-                )
-                .await?;
-            state
-                .db
-                .insert_run_errors(run_id, error_records_vec)
-                .await?;
-            let event = json!({
-                "event": "task_completed",
-                "task_id": task.id,
-                "run_id": run_id,
-                "status": "success",
-                "copied_files": copied_files_val,
-                "failed_files": failed_files_val,
-                "copied_bytes": copied_bytes_val,
-                "at": Utc::now().to_rfc3339(),
-            });
-            broadcast_json(&state.ws_tx, event.clone());
-            persist_task_event(&state.event_tx, task.id, Some(run_id), event);
+    let finalize_result = async {
+        match &transfer_result {
+            Ok(_) => {
+                state
+                    .db
+                    .finish_run(
+                        run_id,
+                        "success",
+                        copied_files_val,
+                        failed_files_val,
+                        copied_bytes_val,
+                        None,
+                    )
+                    .await?;
+                state
+                    .db
+                    .insert_run_errors(run_id, error_records_vec)
+                    .await?;
+                let event = json!({
+                    "event": "task_completed",
+                    "task_id": task.id,
+                    "run_id": run_id,
+                    "status": "success",
+                    "copied_files": copied_files_val,
+                    "failed_files": failed_files_val,
+                    "copied_bytes": copied_bytes_val,
+                    "at": Utc::now().to_rfc3339(),
+                });
+                broadcast_json(&state.ws_tx, event.clone());
+                persist_task_event(&state.event_tx, task.id, Some(run_id), event);
+            }
+            Err(err) => {
+                state
+                    .db
+                    .finish_run(
+                        run_id,
+                        "failed",
+                        copied_files_val,
+                        failed_files_val,
+                        copied_bytes_val,
+                        Some(err.to_string()),
+                    )
+                    .await?;
+                state
+                    .db
+                    .insert_run_errors(run_id, error_records_vec)
+                    .await?;
+                let event = json!({
+                    "event": "task_completed",
+                    "task_id": task.id,
+                    "run_id": run_id,
+                    "status": "failed",
+                    "copied_files": copied_files_val,
+                    "failed_files": failed_files_val,
+                    "copied_bytes": copied_bytes_val,
+                    "error": err.to_string(),
+                    "at": Utc::now().to_rfc3339(),
+                });
+                broadcast_json(&state.ws_tx, event.clone());
+                persist_task_event(&state.event_tx, task.id, Some(run_id), event);
+            }
         }
-        Err(err) => {
-            state
-                .db
-                .finish_run(
-                    run_id,
-                    "failed",
-                    copied_files_val,
-                    failed_files_val,
-                    copied_bytes_val,
-                    Some(err.to_string()),
-                )
-                .await?;
-            state
-                .db
-                .insert_run_errors(run_id, error_records_vec)
-                .await?;
-            let event = json!({
-                "event": "task_completed",
-                "task_id": task.id,
-                "run_id": run_id,
-                "status": "failed",
-                "copied_files": copied_files_val,
-                "failed_files": failed_files_val,
-                "copied_bytes": copied_bytes_val,
-                "error": err.to_string(),
-                "at": Utc::now().to_rfc3339(),
-            });
-            broadcast_json(&state.ws_tx, event.clone());
-            persist_task_event(&state.event_tx, task.id, Some(run_id), event);
-        }
+        Ok::<(), anyhow::Error>(())
     }
+    .await;
 
     state.running_tasks.lock().await.remove(&task.id);
-    result
+    if let Err(finalize_err) = finalize_result {
+        return match transfer_result {
+            Ok(_) => Err(finalize_err),
+            Err(transfer_err) => Err(anyhow!(
+                "task run failed: {}; and failed to persist final run state: {}",
+                transfer_err,
+                finalize_err
+            )),
+        };
+    }
+    transfer_result
 }
 
 fn parse_mode(mode: &str) -> Result<SyncMode> {
@@ -1752,9 +1769,9 @@ fn normalize_create_remote_request(req: &mut CreateRemoteRequest) -> Result<(), 
     if req.r#type.is_empty() {
         return Err(ApiError::bad_request("remote type is required"));
     }
-    if !matches!(req.r#type.as_str(), "fs" | "s3" | "ftp" | "sftp") {
+    if !matches!(req.r#type.as_str(), "fs" | "s3" | "sftp") {
         return Err(ApiError::bad_request(
-            "remote type must be one of: fs|s3|ftp|sftp",
+            "remote type must be one of: fs|s3|sftp (ftp is not supported in this build)",
         ));
     }
     if !req.config_json.is_object() {
@@ -1768,9 +1785,9 @@ fn normalize_update_remote_request(req: &mut UpdateRemoteRequest) -> Result<(), 
     if req.r#type.is_empty() {
         return Err(ApiError::bad_request("remote type is required"));
     }
-    if !matches!(req.r#type.as_str(), "fs" | "s3" | "ftp" | "sftp") {
+    if !matches!(req.r#type.as_str(), "fs" | "s3" | "sftp") {
         return Err(ApiError::bad_request(
-            "remote type must be one of: fs|s3|ftp|sftp",
+            "remote type must be one of: fs|s3|sftp (ftp is not supported in this build)",
         ));
     }
     if !req.config_json.is_object() {
@@ -1803,7 +1820,7 @@ fn broadcast_json(sender: &broadcast::Sender<String>, value: serde_json::Value) 
 }
 
 fn persist_task_event(
-    sender: &UnboundedSender<TaskEventWrite>,
+    sender: &Sender<TaskEventWrite>,
     task_id: i64,
     run_id: Option<i64>,
     value: serde_json::Value,
@@ -1816,7 +1833,7 @@ fn persist_task_event(
     let created_at = value
         .get("at")
         .and_then(|v| v.as_str())
-        .unwrap_or_else(|| "")
+        .unwrap_or("")
         .to_string();
     let payload = value.to_string();
     let record = TaskEventWrite {
@@ -1830,12 +1847,31 @@ fn persist_task_event(
             created_at
         },
     };
-    if sender.send(record).is_err() {
-        warn!(task_id = task_id, run_id = ?run_id, "persist task event dropped: writer channel closed");
+    match sender.try_send(record) {
+        Ok(()) => {}
+        Err(tokio::sync::mpsc::error::TrySendError::Full(full_record)) => {
+            let should_drop = matches!(
+                full_record.event_type.as_str(),
+                "task_progress" | "task_file_uploaded"
+            );
+            let dropped = DROPPED_TASK_EVENTS.fetch_add(1, Ordering::Relaxed) + 1;
+            if !should_drop || dropped.is_multiple_of(100) {
+                warn!(
+                    task_id = task_id,
+                    run_id = ?run_id,
+                    event_type = %full_record.event_type,
+                    dropped_total = dropped,
+                    "persist task event dropped: queue is full"
+                );
+            }
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+            warn!(task_id = task_id, run_id = ?run_id, "persist task event dropped: writer channel closed");
+        }
     }
 }
 
-async fn task_event_writer_worker(db: Db, mut rx: UnboundedReceiver<TaskEventWrite>) {
+async fn task_event_writer_worker(db: Db, mut rx: Receiver<TaskEventWrite>) {
     while let Some(first) = rx.recv().await {
         let mut batch = vec![first];
         while batch.len() < 500 {
@@ -1917,4 +1953,123 @@ fn now_unix_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tokio::sync::broadcast;
+
+    fn test_db_path() -> PathBuf {
+        let ts = now_unix_millis();
+        std::env::temp_dir().join(format!("flowsync-test-{ts}.db"))
+    }
+
+    #[tokio::test]
+    async fn execute_task_should_release_running_state_on_failure() {
+        let db_path = test_db_path();
+        let db = Db::new(db_path.clone());
+        db.init().await.expect("init test db");
+
+        let created = db
+            .create_task(CreateTaskRequest {
+                name: "cleanup-check".to_string(),
+                source: "missing_remote:/src".to_string(),
+                destination: "missing_remote:/dst".to_string(),
+                mode: "copy".to_string(),
+                cron_expr: None,
+                enabled: true,
+                transfers: 1,
+                checkers: 1,
+                checksum: false,
+                ignore_existing: false,
+                dry_run: false,
+                include: Vec::new(),
+                exclude: Vec::new(),
+                bandwidth_limit: None,
+                chunk_size: "8MB".to_string(),
+            })
+            .await
+            .expect("create test task");
+
+        let scheduler = JobScheduler::new().await.expect("create scheduler");
+        let (ws_tx, _) = broadcast::channel(16);
+        let (event_tx, _event_rx) = channel::<TaskEventWrite>(16);
+        let state = Arc::new(AppState {
+            db: db.clone(),
+            scheduler,
+            scheduled_jobs: Arc::new(Mutex::new(HashMap::new())),
+            running_tasks: Arc::new(Mutex::new(HashSet::new())),
+            ws_tx,
+            event_tx,
+            system: Arc::new(Mutex::new(System::new_with_specifics(
+                RefreshKind::new()
+                    .with_cpu(CpuRefreshKind::everything())
+                    .with_memory(MemoryRefreshKind::everything()),
+            ))),
+        });
+
+        let result = execute_task(state.clone(), created.clone(), "manual").await;
+        assert!(result.is_err(), "missing remote should fail task execution");
+
+        let running = state.running_tasks.lock().await;
+        assert!(
+            !running.contains(&created.id),
+            "failed task must be removed from running_tasks"
+        );
+
+        let _ = tokio::fs::remove_file(db_path).await;
+    }
+
+    #[test]
+    fn persist_task_event_should_drop_progress_event_when_queue_is_full() {
+        DROPPED_TASK_EVENTS.store(0, Ordering::Relaxed);
+        let (tx, mut rx) = channel::<TaskEventWrite>(1);
+        tx.try_send(TaskEventWrite {
+            task_id: 42,
+            run_id: None,
+            event_type: "seed".to_string(),
+            payload: "{}".to_string(),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+        })
+        .expect("seed queue");
+
+        persist_task_event(
+            &tx,
+            42,
+            Some(7),
+            json!({
+                "event": "task_progress",
+                "at": "2026-01-01T00:00:01Z",
+                "progress_pct": 50
+            }),
+        );
+
+        let dropped = DROPPED_TASK_EVENTS.load(Ordering::Relaxed);
+        assert_eq!(dropped, 1, "full queue should count dropped event");
+        let first = rx.try_recv().expect("seed event should still exist");
+        assert_eq!(first.event_type, "seed");
+        assert!(rx.try_recv().is_err(), "progress event should be dropped");
+    }
+
+    #[test]
+    fn persist_task_event_should_fill_created_at_when_missing() {
+        let (tx, mut rx) = channel::<TaskEventWrite>(4);
+        persist_task_event(
+            &tx,
+            1,
+            None,
+            json!({
+                "event": "task_started"
+            }),
+        );
+
+        let rec = rx.try_recv().expect("event should be queued");
+        assert_eq!(rec.event_type, "task_started");
+        assert!(
+            !rec.created_at.is_empty(),
+            "created_at should fallback to current timestamp"
+        );
+    }
 }

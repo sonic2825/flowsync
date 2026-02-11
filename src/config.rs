@@ -122,7 +122,7 @@ pub fn run_config_wizard() -> Result<()> {
 
     let backend_idx = Select::new()
         .with_prompt("Backend type")
-        .items(&["fs", "s3", "ftp", "sftp"])
+        .items(&["fs", "s3", "sftp"])
         .default(0)
         .interact()
         .context("failed to read backend type")?;
@@ -181,33 +181,6 @@ pub fn run_config_wizard() -> Result<()> {
                 secret_access_key: optional(sk),
                 session_token: None,
                 url_style: optional(url_style),
-                root: optional(root),
-            }
-        }
-        2 => {
-            let endpoint: String = Input::new()
-                .with_prompt("FTP endpoint (host:port)")
-                .interact_text()
-                .context("failed to read ftp endpoint")?;
-            let user: String = Input::new()
-                .allow_empty(true)
-                .with_prompt("FTP user (optional)")
-                .interact_text()
-                .context("failed to read ftp user")?;
-            let password: String = Password::new()
-                .allow_empty_password(true)
-                .with_prompt("FTP password (optional)")
-                .interact()
-                .context("failed to read ftp password")?;
-            let root: String = Input::new()
-                .allow_empty(true)
-                .with_prompt("FTP root (optional)")
-                .interact_text()
-                .context("failed to read ftp root")?;
-            RemoteConfig::Ftp {
-                endpoint,
-                user: optional(user),
-                password: optional(password),
                 root: optional(root),
             }
         }

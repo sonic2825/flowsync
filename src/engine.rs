@@ -88,6 +88,14 @@ struct Action {
     size: u64,
 }
 
+struct CompareContext<'a> {
+    source_op: &'a Operator,
+    source_base: &'a str,
+    target_op: &'a Operator,
+    target_base: &'a str,
+    stream_chunk_size: usize,
+}
+
 pub async fn list(op: &Operator, path: &str) -> Result<()> {
     let base = normalize_list_base(path);
     let mut lister = op.lister_with(&base).recursive(true).await?;
@@ -150,17 +158,16 @@ pub async fn run_transfer_with_reporter(
             let options = options.clone();
 
             async move {
-                let decision = should_copy(
-                    &src,
-                    target_map.get(&src.rel_path),
-                    &source_op,
-                    &source_path,
-                    &target_op,
-                    &target_path,
-                    options.stream_chunk_size,
-                    &options,
-                )
-                .await?;
+                let compare_ctx = CompareContext {
+                    source_op: &source_op,
+                    source_base: &source_path,
+                    target_op: &target_op,
+                    target_base: &target_path,
+                    stream_chunk_size: options.stream_chunk_size,
+                };
+                let decision =
+                    should_copy(&src, target_map.get(&src.rel_path), &compare_ctx, &options)
+                        .await?;
 
                 Ok::<Option<Action>, anyhow::Error>(if decision {
                     Some(Action {
@@ -235,7 +242,6 @@ pub async fn run_transfer_with_reporter(
             let stream_chunk_size = options.stream_chunk_size;
             let reporter = reporter.clone();
             let copied_bytes = copied_bytes.clone();
-            let total_size = total_size;
 
             async move {
                 if let Err(err) = copy_one(
@@ -438,11 +444,7 @@ async fn collect_files(
 async fn should_copy(
     source: &FileEntry,
     target: Option<&FileEntry>,
-    source_op: &Operator,
-    source_base: &str,
-    target_op: &Operator,
-    target_base: &str,
-    stream_chunk_size: usize,
+    compare: &CompareContext<'_>,
     options: &SyncOptions,
 ) -> Result<bool> {
     if target.is_none() {
@@ -461,15 +463,15 @@ async fn should_copy(
     }
 
     let src_hash = file_hash(
-        source_op,
-        &join_path(source_base, &source.rel_path),
-        stream_chunk_size,
+        compare.source_op,
+        &join_path(compare.source_base, &source.rel_path),
+        compare.stream_chunk_size,
     )
     .await?;
     let dst_hash = file_hash(
-        target_op,
-        &join_path(target_base, &source.rel_path),
-        stream_chunk_size,
+        compare.target_op,
+        &join_path(compare.target_base, &source.rel_path),
+        compare.stream_chunk_size,
     )
     .await?;
     Ok(src_hash != dst_hash)
@@ -512,7 +514,14 @@ async fn copy_one(
     if let Some(parent) = Path::new(&target_path).parent() {
         let p = parent.to_string_lossy().replace('\\', "/");
         if !p.is_empty() {
-            let _ = retry_async(|| async { target_op.create_dir(&p).await }, 2).await;
+            if let Err(err) = retry_async(|| async { target_op.create_dir(&p).await }, 2).await {
+                warn!(
+                    path = %target_path,
+                    parent = %p,
+                    error = ?err,
+                    "create target dir failed, continue to write file"
+                );
+            }
         }
     }
 
