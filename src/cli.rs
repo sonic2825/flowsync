@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "rust-s3-sync",
+    name = "flowsync",
     version,
     about = "Multi backend sync tool based on OpenDAL"
 )]
@@ -27,6 +27,9 @@ pub struct Cli {
 
     #[arg(long, global = true)]
     pub bandwidth_limit: Option<String>,
+
+    #[arg(long, global = true, default_value = "8MB")]
+    pub chunk_size: String,
 
     #[arg(long, global = true)]
     pub checksum: bool,
@@ -73,7 +76,7 @@ pub struct ServerArgs {
     #[arg(long, default_value_t = 3030)]
     pub port: u16,
 
-    #[arg(long, default_value = "rust_s3_sync.db")]
+    #[arg(long, default_value = "flowsync.db")]
     pub db: String,
 
     #[arg(long, default_value_t = 7)]

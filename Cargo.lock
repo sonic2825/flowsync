@@ -599,6 +599,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b7ac824320a75a52197e8f2d787f6a38b6718bb6897a35142d749af3c0e8f4fe"
 
 [[package]]
+name = "flowsync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytesize",
+ "chrono",
+ "clap",
+ "dialoguer",
+ "futures",
+ "globset",
+ "indicatif",
+ "md5",
+ "opendal",
+ "rusqlite",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tokio",
+ "tokio-cron-scheduler",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "walkdir",
+]
+
+[[package]]
 name = "form_urlencoded"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1831,36 +1861,6 @@ checksum = "796e8d2b6696392a43bea58116b667fb4c29727dc5abd27d6acf338bb4f688c7"
 dependencies = [
  "cfg-if",
  "ordered-multimap",
-]
-
-[[package]]
-name = "rust-s3-sync"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytesize",
- "chrono",
- "clap",
- "dialoguer",
- "futures",
- "globset",
- "indicatif",
- "md5",
- "opendal",
- "rusqlite",
- "rust-embed",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tokio",
- "tokio-cron-scheduler",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "walkdir",
 ]
 
 [[package]]

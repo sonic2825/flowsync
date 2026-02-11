@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>rust-s3-sync 管理后台</title>
+  <title>FlowSync 管理后台</title>
   <style>
     :root {
       --bg: #eff3f8;
@@ -141,6 +141,30 @@
       font-size: 15px;
     }
     .check-item input[type="checkbox"] { width: 16px; height: 16px; }
+    .param-grid {
+      display: grid;
+      gap: 10px;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .param-field {
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: #fff;
+      padding: 10px;
+    }
+    .param-field label {
+      display: block;
+      font-size: 13px;
+      font-weight: 700;
+      color: #2b3a4f;
+      margin-bottom: 8px;
+    }
+    .param-field .hint {
+      margin-top: 6px;
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
     .log-box {
       background: #111827;
       color: #d7fbd6;
@@ -255,7 +279,7 @@
 <body>
   <div class="app-shell">
     <div class="headline">
-      <h1>rust-s3-sync Web 管理后台</h1>
+      <h1>FlowSync Web 管理后台</h1>
       <div class="subtle">任务管理、Remotes 配置与运行审计</div>
     </div>
 
@@ -443,10 +467,27 @@
         </div>
         <div class="form-block">
           <h3>执行参数</h3>
-          <div class="row">
-            <input id="transfers" type="number" min="1" value="4" placeholder="transfers" />
-            <input id="checkers" type="number" min="1" value="8" placeholder="checkers" />
-            <input id="bandwidth" placeholder="限速 (可选，如 100MB)" />
+          <div class="param-grid">
+            <div class="param-field">
+              <label for="transfers">并发传输数</label>
+              <input id="transfers" type="number" min="1" value="4" placeholder="默认 4" />
+              <div class="hint">同时执行文件传输的数量。值越大速度可能越快，但更占用带宽和 CPU。</div>
+            </div>
+            <div class="param-field">
+              <label for="checkers">并发检查数</label>
+              <input id="checkers" type="number" min="1" value="8" placeholder="默认 8" />
+              <div class="hint">同时执行源/目标扫描与差异比对的数量。值越大前期扫描更快。</div>
+            </div>
+            <div class="param-field">
+              <label for="bandwidth">带宽限制</label>
+              <input id="bandwidth" placeholder="可选，如 100MB" />
+              <div class="hint">为空表示不限速；设置后可降低对业务网络的影响。</div>
+            </div>
+            <div class="param-field">
+              <label for="chunkSize">流式分块大小</label>
+              <input id="chunkSize" placeholder="默认 8MB（如 8MB / 16MB / 32MB）" />
+              <div class="hint">单文件按块读写与哈希，减小内存峰值。S3 场景建议从 8MB 起步。</div>
+            </div>
           </div>
           <div class="check-row" style="margin-top:10px;">
             <label class="check-item"><input id="checksum" type="checkbox" /> checksum</label>
@@ -872,6 +913,7 @@
       byId('ignoreExisting').checked = Boolean(data.ignore_existing);
       byId('dryRun').checked = Boolean(data.dry_run);
       byId('bandwidth').value = data.bandwidth_limit || '';
+      byId('chunkSize').value = data.chunk_size || '8MB';
       openTaskModal();
     }
     function duplicateTask(payload) {
@@ -889,6 +931,7 @@
       byId('ignoreExisting').checked = Boolean(data.ignore_existing);
       byId('dryRun').checked = Boolean(data.dry_run);
       byId('bandwidth').value = data.bandwidth_limit || '';
+      byId('chunkSize').value = data.chunk_size || '8MB';
       openTaskModal();
     }
     function resetTaskFormToCreateMode() {
@@ -899,6 +942,7 @@
       byId('taskForm').reset();
       byId('transfers').value = 4;
       byId('checkers').value = 8;
+      byId('chunkSize').value = '8MB';
       byId('enabled').checked = true;
     }
     window.runTask = runTask;
@@ -1072,7 +1116,8 @@
         dry_run: byId('dryRun').checked,
         include: [],
         exclude: [],
-        bandwidth_limit: byId('bandwidth').value || null
+        bandwidth_limit: byId('bandwidth').value || null,
+        chunk_size: byId('chunkSize').value || '8MB'
       };
       if (editingTaskId) {
         await api(`/api/tasks/${editingTaskId}`, {

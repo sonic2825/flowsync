@@ -9,7 +9,9 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Commands};
-use crate::engine::{list, parse_bandwidth_limit, run_transfer, SyncMode, SyncOptions};
+use crate::engine::{
+    list, parse_bandwidth_limit, parse_stream_chunk_size, run_transfer, SyncMode, SyncOptions,
+};
 use crate::remote::Location;
 use crate::server::run_server;
 
@@ -23,6 +25,7 @@ struct RuntimeOptions {
     include: Vec<String>,
     exclude: Vec<String>,
     bandwidth_limit: Option<String>,
+    chunk_size: String,
 }
 
 #[tokio::main]
@@ -45,6 +48,7 @@ async fn main() -> Result<()> {
         include: cli.include.clone(),
         exclude: cli.exclude.clone(),
         bandwidth_limit: cli.bandwidth_limit.clone(),
+        chunk_size: cli.chunk_size.clone(),
     };
 
     match cli.command {
@@ -100,6 +104,7 @@ async fn execute_transfer(
         include: runtime.include.clone(),
         exclude: runtime.exclude.clone(),
         bandwidth_limit: parse_bandwidth_limit(runtime.bandwidth_limit.as_deref())?,
+        stream_chunk_size: parse_stream_chunk_size(Some(runtime.chunk_size.as_str()))?,
     };
 
     run_transfer(mode, source_op, src, target_op, dst, options).await

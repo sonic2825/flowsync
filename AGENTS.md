@@ -13,7 +13,7 @@
 - `cargo build` builds the binary.
 - `cargo run -- <subcommand> ...` runs locally, for example:
 - `cargo run -- copy local:/data/src s3prod:bucket/prefix`
-- `cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db`
+- `cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db`
 - `cargo test` runs Rust tests (currently lightweight; rely on e2e for behavior coverage).
 - `bash scripts/e2e_minio.sh` runs MinIO-backed e2e validation for `copy/sync/move/ls`.
 - `cargo fmt --all` formats code; `cargo clippy --all-targets -- -D warnings` catches lints before PR.
@@ -40,5 +40,5 @@
 
 ## Security & Configuration Tips
 - Never commit real secrets in `config.toml` or database files.
-- Use `RUST_S3_SYNC_CONFIG` for test/local overrides.
+- Use `FLOWSYNC_CONFIG` for test/local overrides.
 - Treat `sync` and `move` as destructive operations; verify with `--dry-run` first.

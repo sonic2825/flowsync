@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -14,6 +14,8 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 
 use crate::remote::Location;
+
+pub const DEFAULT_STREAM_CHUNK_SIZE: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum SyncMode {
@@ -32,6 +34,7 @@ pub struct SyncOptions {
     pub include: Vec<String>,
     pub exclude: Vec<String>,
     pub bandwidth_limit: Option<u64>,
+    pub stream_chunk_size: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -154,6 +157,7 @@ pub async fn run_transfer_with_reporter(
                     &source_path,
                     &target_op,
                     &target_path,
+                    options.stream_chunk_size,
                     &options,
                 )
                 .await?;
@@ -228,13 +232,22 @@ pub async fn run_transfer_with_reporter(
             let failures = failures.clone();
             let pb = pb.clone();
             let bw = options.bandwidth_limit;
+            let stream_chunk_size = options.stream_chunk_size;
             let reporter = reporter.clone();
             let copied_bytes = copied_bytes.clone();
             let total_size = total_size;
 
             async move {
-                if let Err(err) =
-                    copy_one(&src, &src_base, &dst, &dst_base, &action.rel_path, bw).await
+                if let Err(err) = copy_one(
+                    &src,
+                    &src_base,
+                    &dst,
+                    &dst_base,
+                    &action.rel_path,
+                    bw,
+                    stream_chunk_size,
+                )
+                .await
                 {
                     error!(path = %action.rel_path, error = %err, "copy failed");
                     failures
@@ -250,7 +263,8 @@ pub async fn run_transfer_with_reporter(
                     );
                 } else {
                     pb.inc(action.size);
-                    let completed = copied_bytes.fetch_add(action.size, Ordering::Relaxed) + action.size;
+                    let completed =
+                        copied_bytes.fetch_add(action.size, Ordering::Relaxed) + action.size;
                     emit(
                         &reporter,
                         TransferEvent::Copied {
@@ -428,6 +442,7 @@ async fn should_copy(
     source_base: &str,
     target_op: &Operator,
     target_base: &str,
+    stream_chunk_size: usize,
     options: &SyncOptions,
 ) -> Result<bool> {
     if target.is_none() {
@@ -445,17 +460,41 @@ async fn should_copy(
         return Ok(true);
     }
 
-    let src_hash = file_hash(source_op, &join_path(source_base, &source.rel_path)).await?;
-    let dst_hash = file_hash(target_op, &join_path(target_base, &source.rel_path)).await?;
+    let src_hash = file_hash(
+        source_op,
+        &join_path(source_base, &source.rel_path),
+        stream_chunk_size,
+    )
+    .await?;
+    let dst_hash = file_hash(
+        target_op,
+        &join_path(target_base, &source.rel_path),
+        stream_chunk_size,
+    )
+    .await?;
     Ok(src_hash != dst_hash)
 }
 
-async fn file_hash(op: &Operator, path: &str) -> Result<String> {
-    let bytes = retry_async(|| async { op.read(path).await }, 3)
+async fn file_hash(op: &Operator, path: &str, stream_chunk_size: usize) -> Result<String> {
+    let reader = retry_async(
+        || async { op.reader_with(path).chunk(stream_chunk_size).await },
+        3,
+    )
+    .await
+    .with_context(|| format!("failed to open reader for hash: {path}"))?;
+    let mut stream = reader
+        .into_bytes_stream(..)
         .await
-        .with_context(|| format!("failed to read for hash: {path}"))?;
-    let digest = sha2::Sha256::digest(bytes.to_vec());
-    Ok(format!("{:x}", digest))
+        .with_context(|| format!("failed to create hash stream: {path}"))?;
+    let mut digest = sha2::Sha256::new();
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .with_context(|| format!("failed to read hash chunk: {path}"))?
+    {
+        digest.update(&chunk);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 async fn copy_one(
@@ -465,6 +504,7 @@ async fn copy_one(
     target_base: &str,
     rel_path: &str,
     bandwidth_limit: Option<u64>,
+    stream_chunk_size: usize,
 ) -> Result<()> {
     let source_path = join_path(source_base, rel_path);
     let target_path = join_path(target_base, rel_path);
@@ -476,25 +516,57 @@ async fn copy_one(
         }
     }
 
-    let data = retry_async(|| async { source_op.read(&source_path).await }, 3)
-        .await
-        .with_context(|| format!("failed to read source: {source_path}"))?;
-
-    if let Some(limit) = bandwidth_limit {
-        if limit > 0 {
-            let seconds = data.len() as f64 / limit as f64;
-            if seconds > 0.0 {
-                sleep(Duration::from_secs_f64(seconds)).await;
-            }
-        }
-    }
-
-    retry_async(
-        || async { target_op.write(&target_path, data.clone()).await },
+    let reader = retry_async(
+        || async {
+            source_op
+                .reader_with(&source_path)
+                .chunk(stream_chunk_size)
+                .await
+        },
         3,
     )
     .await
-    .with_context(|| format!("failed to write target: {target_path}"))?;
+    .with_context(|| format!("failed to open source reader: {source_path}"))?;
+    let mut stream = reader
+        .into_bytes_stream(..)
+        .await
+        .with_context(|| format!("failed to create source stream: {source_path}"))?;
+    let mut writer = retry_async(
+        || async {
+            target_op
+                .writer_with(&target_path)
+                .chunk(stream_chunk_size)
+                .await
+        },
+        3,
+    )
+    .await
+    .with_context(|| format!("failed to open target writer: {target_path}"))?;
+
+    while let Some(chunk) = stream
+        .try_next()
+        .await
+        .with_context(|| format!("failed to read source chunk: {source_path}"))?
+    {
+        if let Some(limit) = bandwidth_limit {
+            if limit > 0 {
+                let seconds = chunk.len() as f64 / limit as f64;
+                if seconds > 0.0 {
+                    sleep(Duration::from_secs_f64(seconds)).await;
+                }
+            }
+        }
+
+        writer
+            .write(chunk)
+            .await
+            .with_context(|| format!("failed to write target chunk: {target_path}"))?;
+    }
+
+    writer
+        .close()
+        .await
+        .with_context(|| format!("failed to finalize target write: {target_path}"))?;
 
     Ok(())
 }
@@ -575,6 +647,36 @@ pub fn parse_bandwidth_limit(s: Option<&str>) -> Result<Option<u64>> {
     };
 
     Ok(Some((value * multiplier) as u64))
+}
+
+pub fn parse_stream_chunk_size(s: Option<&str>) -> Result<usize> {
+    let raw = s.unwrap_or("8MB");
+    let trimmed = raw.trim().to_uppercase();
+    if trimmed.is_empty() {
+        return Ok(DEFAULT_STREAM_CHUNK_SIZE);
+    }
+
+    let (num, unit) = split_num_unit(&trimmed);
+    let value: f64 = num
+        .parse()
+        .with_context(|| format!("invalid chunk size value: {raw}"))?;
+    if value <= 0.0 {
+        return Err(anyhow!("chunk size must be greater than 0"));
+    }
+
+    let multiplier = match unit {
+        "" | "B" => 1f64,
+        "K" | "KB" | "KIB" => 1024f64,
+        "M" | "MB" | "MIB" => 1024f64 * 1024f64,
+        "G" | "GB" | "GIB" => 1024f64 * 1024f64 * 1024f64,
+        _ => return Err(anyhow!("invalid chunk size unit: {unit}")),
+    };
+
+    let bytes = (value * multiplier) as u64;
+    if bytes == 0 {
+        return Err(anyhow!("chunk size must be greater than 0"));
+    }
+    usize::try_from(bytes).context("chunk size is too large for this platform")
 }
 
 fn split_num_unit(input: &str) -> (&str, &str) {

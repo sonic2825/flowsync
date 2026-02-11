@@ -1,5 +1,5 @@
 [package]
-name = "rust-s3-sync"
+name = "flowsync"
 version = "0.1.0"
 edition = "2021"
 

@@ -1,4 +1,4 @@
-# rust-s3-sync
+# FlowSync
 
 基于 Rust + OpenDAL 的多后端文件同步 CLI 工具。
 
@@ -13,6 +13,7 @@
 - 并发：
   - `--transfers` 控制并发传输
   - `--checkers` 控制差异检查并发（尤其在 `--checksum` 时）
+  - `--chunk-size` 控制单文件流式分块大小（默认 `8MB`）
 - 可观测性：
   - `indicatif` 总进度条
   - `--log-level` 日志级别
@@ -63,7 +64,7 @@ cargo run -- ls s3prod:prefix
 6) 启动 Web 管理后台与任务调度：
 
 ```bash
-cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
+cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
 ```
 
 可选事件回放清理策略参数（默认开启）：
@@ -72,7 +73,7 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 cargo run -- server \
   --host 127.0.0.1 \
   --port 3030 \
-  --db rust_s3_sync.db \
+  --db flowsync.db \
   --event-retention-days 7 \
   --event-max-rows 200000 \
   --event-cleanup-interval-secs 300
@@ -132,7 +133,7 @@ cargo run -- ls s3prod:prefix
 
 ### `config init`
 
-- 作用：交互式初始化本地配置文件（默认 `~/.config/rust-s3-sync/config.toml`）
+- 作用：交互式初始化本地配置文件（默认 `~/.config/flowsync/config.toml`）
 - 适合：首次使用时快速生成 remotes 配置
 - 说明：Web 端也可管理 remotes；执行任务时优先读取数据库中的 remotes
 - 示例：
@@ -157,6 +158,7 @@ cargo run -- config init
 | `--log-level <LEVEL>` | `info` | 日志级别（如 `trace`/`debug`/`info`/`warn`/`error`） |
 | `--transfers <N>` | `4` | 传输并发数（实际复制/写入并发） |
 | `--checkers <N>` | `8` | 差异检查并发数（决定是否需要复制的检查阶段） |
+| `--chunk-size <SIZE>` | `8MB` | 单文件流式读写/哈希分块大小，支持 `KB/MB/GB` 与 `KiB/MiB/GiB` |
 | `--dry-run` | `false` | 仅打印计划动作，不执行写入/删除 |
 | `--include <GLOB>` | 空 | 仅包含匹配的相对路径，可重复传入 |
 | `--exclude <GLOB>` | 空 | 排除匹配的相对路径，可重复传入 |
@@ -169,6 +171,12 @@ cargo run -- config init
 - 默认：按 `size + mtime` 判断。
 - 开启 `--checksum`：按 SHA256 判断（会额外读取源与目标文件）。
 - 开启 `--ignore-existing`：目标存在即跳过，优先于内容比较。
+
+### `--chunk-size` 调优建议
+
+- 默认 `8MB` 适合大多数 S3/对象存储场景。
+- 内存紧张或高并发任务较多：可降到 `4MB`~`8MB`。
+- 大文件、高吞吐网络：可尝试 `16MB`~`32MB`（通常更高吞吐，但会增加内存占用）。
 
 ## 参数使用示例
 
@@ -196,7 +204,13 @@ cargo run -- --checksum --checkers 16 sync local:/data/src s3prod:prefix
 cargo run -- --transfers 16 --bandwidth-limit 100MB sync local:/data/src s3prod:prefix
 ```
 
-5) 只同步指定目录并排除临时文件：
+5) 调整单文件分块大小（大文件场景）：
+
+```bash
+cargo run -- --transfers 8 --chunk-size 16MB sync local:/data/src s3prod:prefix
+```
+
+6) 只同步指定目录并排除临时文件：
 
 ```bash
 cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync local:/data/src s3prod:prefix
@@ -286,7 +300,7 @@ cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync
 
 ```json
 {
-  "root": "/Users/td/script/rust-s3-sync/test"
+  "root": "/Users/td/script/flowsync/test"
 }
 ```
 
@@ -307,12 +321,12 @@ cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync
 ```
 
 说明：
-- `root` 是运行 `rust-s3-sync` 进程所在机器的本地路径，不是浏览器客户端机器路径
+- `root` 是运行 `flowsync` 进程所在机器的本地路径，不是浏览器客户端机器路径
 - 你给出的配置是有效的：
 
 ```json
 {
-  "root": "/Users/td/script/rust-s3-sync/test/"
+  "root": "/Users/td/script/flowsync/test/"
 }
 ```
 
@@ -333,12 +347,12 @@ cargo run -- --include "images/**" --include "docs/**" --exclude "**/*.tmp" sync
 
 #### 从零到可用（最短实操示例）
 
-目标：把本机目录 `/Users/td/script/rust-s3-sync/test/src` 同步到 `/Users/td/script/rust-s3-sync/test/dst`。
+目标：把本机目录 `/Users/td/script/flowsync/test/src` 同步到 `/Users/td/script/flowsync/test/dst`。
 
 1) 启动服务
 
 ```bash
-cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
+cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
 ```
 
 浏览器打开：`http://127.0.0.1:3030`
@@ -352,7 +366,7 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 
 ```json
 {
-  "root": "/Users/td/script/rust-s3-sync/test/src"
+  "root": "/Users/td/script/flowsync/test/src"
 }
 ```
 
@@ -363,7 +377,7 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 
 ```json
 {
-  "root": "/Users/td/script/rust-s3-sync/test/dst"
+  "root": "/Users/td/script/flowsync/test/dst"
 }
 ```
 
@@ -375,6 +389,7 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
   - 模式：`sync`
   - source：`local_src:`
   - destination：`local_dst:`
+  - 执行参数：`并发传输数` / `并发检查数` / `流式分块大小(默认 8MB)`
   - 启用调度：先不勾（或 cron 留空）
 - 提交后在任务列表点击「立即运行」
 
@@ -384,7 +399,7 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db rust_s3_sync.db
 - 检查目标目录是否已有同步文件：
 
 ```bash
-ls -la /Users/td/script/rust-s3-sync/test/dst
+ls -la /Users/td/script/flowsync/test/dst
 ```
 
 可选：
@@ -442,8 +457,9 @@ KEEP_MINIO_UP=0 ./scripts/e2e_minio.sh
 
 ## 配置文件
 
-默认路径：`~/.config/rust-s3-sync/config.toml`  
-可通过环境变量覆盖：`RUST_S3_SYNC_CONFIG=/path/to/config.toml`
+默认路径：`~/.config/flowsync/config.toml`  
+可通过环境变量覆盖：`FLOWSYNC_CONFIG=/path/to/config.toml`  
+兼容旧变量：`RUST_S3_SYNC_CONFIG`（仅用于平滑迁移，建议切换到 `FLOWSYNC_CONFIG`）
 
 示例：
 

@@ -28,7 +28,10 @@ impl Location {
     }
 }
 
-pub fn resolve_location_and_operator(cfg: &AppConfig, mut location: Location) -> Result<(Location, Operator)> {
+pub fn resolve_location_and_operator(
+    cfg: &AppConfig,
+    mut location: Location,
+) -> Result<(Location, Operator)> {
     let remote = cfg
         .remotes
         .get(&location.remote)
@@ -198,6 +201,10 @@ fn split_bucket_and_prefix(path: &str) -> Option<(String, String)> {
     if bucket.is_empty() {
         return None;
     }
-    let prefix = parts.next().unwrap_or("").trim_start_matches('/').to_string();
+    let prefix = parts
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('/')
+        .to_string();
     Some((bucket.to_string(), prefix))
 }

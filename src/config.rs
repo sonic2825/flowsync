@@ -48,7 +48,7 @@ pub enum RemoteConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        let path = default_config_path()?;
+        let path = load_config_path()?;
         if !path.exists() {
             return Ok(Self {
                 remotes: HashMap::new(),
@@ -74,14 +74,42 @@ impl AppConfig {
 }
 
 pub fn default_config_path() -> Result<PathBuf> {
+    if let Ok(explicit) = env::var("FLOWSYNC_CONFIG") {
+        return Ok(PathBuf::from(explicit));
+    }
     if let Ok(explicit) = env::var("RUST_S3_SYNC_CONFIG") {
         return Ok(PathBuf::from(explicit));
     }
     let home = env::var("HOME").context("HOME env is not set")?;
     Ok(PathBuf::from(home)
         .join(".config")
-        .join("rust-s3-sync")
+        .join("flowsync")
         .join("config.toml"))
+}
+
+fn load_config_path() -> Result<PathBuf> {
+    if let Ok(explicit) = env::var("FLOWSYNC_CONFIG") {
+        return Ok(PathBuf::from(explicit));
+    }
+    if let Ok(explicit) = env::var("RUST_S3_SYNC_CONFIG") {
+        return Ok(PathBuf::from(explicit));
+    }
+    let home = env::var("HOME").context("HOME env is not set")?;
+    let preferred = PathBuf::from(&home)
+        .join(".config")
+        .join("flowsync")
+        .join("config.toml");
+    if preferred.exists() {
+        return Ok(preferred);
+    }
+    let legacy = PathBuf::from(home)
+        .join(".config")
+        .join("rust-s3-sync")
+        .join("config.toml");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    Ok(preferred)
 }
 
 pub fn run_config_wizard() -> Result<()> {

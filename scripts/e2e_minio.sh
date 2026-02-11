@@ -75,7 +75,7 @@ url_style = "path"
 root = ""
 CFG
 
-export RUST_S3_SYNC_CONFIG="$CONFIG_FILE"
+export FLOWSYNC_CONFIG="$CONFIG_FILE"
 
 echo "[5/7] 编译并执行 copy + ls 验证..."
 cargo run -- copy local:.tmp/e2e/src minio:copy_case --transfers 4 --log-level info >/dev/null

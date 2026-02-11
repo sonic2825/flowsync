@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -13,7 +13,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use chrono::{Datelike, Duration as ChronoDuration, Local, TimeZone, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -29,8 +29,11 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::config::{AppConfig, RemoteConfig};
-use crate::engine::{ProgressReporter, SyncMode, SyncOptions, TransferEvent, run_transfer_with_reporter};
-use crate::remote::{Location, resolve_location_and_operator};
+use crate::engine::{
+    parse_bandwidth_limit, parse_stream_chunk_size, run_transfer_with_reporter, ProgressReporter,
+    SyncMode, SyncOptions, TransferEvent,
+};
+use crate::remote::{resolve_location_and_operator, Location};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist"]
@@ -106,6 +109,7 @@ impl Db {
                     include_patterns TEXT NOT NULL DEFAULT '[]',
                     exclude_patterns TEXT NOT NULL DEFAULT '[]',
                     bandwidth_limit TEXT,
+                    chunk_size TEXT NOT NULL DEFAULT '8MB',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -148,6 +152,7 @@ impl Db {
                 "#,
             )
             .context("failed to init sqlite schema")?;
+            ensure_tasks_chunk_size_column(&conn)?;
             Ok(())
         })
         .await
@@ -192,7 +197,11 @@ impl Db {
         .context("create remote join error")?
     }
 
-    async fn update_remote(&self, name: &str, req: UpdateRemoteRequest) -> Result<Option<RemoteRecord>> {
+    async fn update_remote(
+        &self,
+        name: &str,
+        req: UpdateRemoteRequest,
+    ) -> Result<Option<RemoteRecord>> {
         let db = self.clone();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<RemoteRecord>> {
@@ -257,7 +266,7 @@ impl Db {
         tokio::task::spawn_blocking(move || -> Result<Vec<TaskRecord>> {
             let conn = db.open()?;
             let mut stmt = conn.prepare(
-                "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,created_at,updated_at
+                "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,chunk_size,created_at,updated_at
                  FROM tasks ORDER BY id DESC",
             )?;
             let mut rows = stmt.query([])?;
@@ -299,7 +308,7 @@ impl Db {
             let conn = db.open()?;
             let task = conn
                 .query_row(
-                    "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,created_at,updated_at
+                    "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,chunk_size,created_at,updated_at
                      FROM tasks WHERE id=?1",
                     params![id],
                     TaskRecord::from_row,
@@ -319,8 +328,8 @@ impl Db {
             let includes = serde_json::to_string(&req.include).context("serialize include")?;
             let excludes = serde_json::to_string(&req.exclude).context("serialize exclude")?;
             conn.execute(
-                "INSERT INTO tasks (name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,created_at,updated_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                "INSERT INTO tasks (name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,chunk_size,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                 params![
                     req.name,
                     req.source,
@@ -336,13 +345,14 @@ impl Db {
                     includes,
                     excludes,
                     req.bandwidth_limit,
+                    req.chunk_size,
                     now,
                     now
                 ],
             )?;
             let id = conn.last_insert_rowid();
             conn.query_row(
-                "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,created_at,updated_at
+                "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,chunk_size,created_at,updated_at
                  FROM tasks WHERE id=?1",
                 params![id],
                 TaskRecord::from_row,
@@ -367,8 +377,8 @@ impl Db {
             let includes = serde_json::to_string(&req.include).context("serialize include")?;
             let excludes = serde_json::to_string(&req.exclude).context("serialize exclude")?;
             conn.execute(
-                "UPDATE tasks SET name=?1,source=?2,destination=?3,mode=?4,cron_expr=?5,enabled=?6,transfers=?7,checkers=?8,checksum=?9,ignore_existing=?10,dry_run=?11,include_patterns=?12,exclude_patterns=?13,bandwidth_limit=?14,updated_at=?15
-                 WHERE id=?16",
+                "UPDATE tasks SET name=?1,source=?2,destination=?3,mode=?4,cron_expr=?5,enabled=?6,transfers=?7,checkers=?8,checksum=?9,ignore_existing=?10,dry_run=?11,include_patterns=?12,exclude_patterns=?13,bandwidth_limit=?14,chunk_size=?15,updated_at=?16
+                 WHERE id=?17",
                 params![
                     req.name,
                     req.source,
@@ -384,13 +394,14 @@ impl Db {
                     includes,
                     excludes,
                     req.bandwidth_limit,
+                    req.chunk_size,
                     now,
                     id
                 ],
             )?;
             let task = conn
                 .query_row(
-                    "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,created_at,updated_at
+                    "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,chunk_size,created_at,updated_at
                      FROM tasks WHERE id=?1",
                     params![id],
                     TaskRecord::from_row,
@@ -416,7 +427,7 @@ impl Db {
             }
             let task = conn
                 .query_row(
-                    "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,created_at,updated_at
+                    "SELECT id,name,source,destination,mode,cron_expr,enabled,transfers,checkers,checksum,ignore_existing,dry_run,include_patterns,exclude_patterns,bandwidth_limit,chunk_size,created_at,updated_at
                      FROM tasks WHERE id=?1",
                     params![id],
                     TaskRecord::from_row,
@@ -725,6 +736,7 @@ struct TaskRecord {
     include: Vec<String>,
     exclude: Vec<String>,
     bandwidth_limit: Option<String>,
+    chunk_size: String,
     created_at: String,
     updated_at: String,
 }
@@ -756,8 +768,9 @@ impl TaskRecord {
             include: serde_json::from_str(&includes_json).unwrap_or_default(),
             exclude: serde_json::from_str(&excludes_json).unwrap_or_default(),
             bandwidth_limit: row.get(14)?,
-            created_at: row.get(15)?,
-            updated_at: row.get(16)?,
+            chunk_size: row.get(15)?,
+            created_at: row.get(16)?,
+            updated_at: row.get(17)?,
         })
     }
 }
@@ -775,9 +788,8 @@ struct RemoteRecord {
 impl RemoteRecord {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         let config_raw: String = row.get(3)?;
-        let config_json = serde_json::from_str(&config_raw).unwrap_or(serde_json::Value::Object(
-            serde_json::Map::new(),
-        ));
+        let config_json = serde_json::from_str(&config_raw)
+            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
         Ok(Self {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -828,6 +840,8 @@ struct CreateTaskRequest {
     #[serde(default)]
     exclude: Vec<String>,
     bandwidth_limit: Option<String>,
+    #[serde(default = "default_chunk_size")]
+    chunk_size: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -854,6 +868,8 @@ struct UpdateTaskRequest {
     #[serde(default)]
     exclude: Vec<String>,
     bandwidth_limit: Option<String>,
+    #[serde(default = "default_chunk_size")]
+    chunk_size: String,
 }
 
 #[derive(Debug, Clone)]
@@ -907,7 +923,8 @@ struct TaskEventRecord {
 impl TaskEventRecord {
     fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         let payload_raw: String = row.get(4)?;
-        let payload = serde_json::from_str(&payload_raw).unwrap_or_else(|_| json!({ "raw": payload_raw }));
+        let payload =
+            serde_json::from_str(&payload_raw).unwrap_or_else(|_| json!({ "raw": payload_raw }));
         Ok(Self {
             id: row.get(0)?,
             task_id: row.get(1)?,
@@ -990,7 +1007,9 @@ pub async fn run_server(
     db.init().await?;
     db.cleanup_task_events(event_cleanup_policy).await?;
 
-    let scheduler = JobScheduler::new().await.context("create scheduler failed")?;
+    let scheduler = JobScheduler::new()
+        .await
+        .context("create scheduler failed")?;
     let (ws_tx, _) = broadcast::channel(1024);
     let (event_tx, event_rx) = unbounded_channel::<TaskEventWrite>();
 
@@ -1019,7 +1038,10 @@ pub async fn run_server(
 
     let app = Router::new()
         .route("/api/health", get(api_health))
-        .route("/api/remotes", get(api_list_remotes).post(api_create_remote))
+        .route(
+            "/api/remotes",
+            get(api_list_remotes).post(api_create_remote),
+        )
         .route(
             "/api/remotes/:name",
             put(api_update_remote).delete(api_delete_remote),
@@ -1047,7 +1069,10 @@ pub async fn run_server(
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             loop {
                 ticker.tick().await;
-                if let Err(err) = db_for_cleanup.cleanup_task_events(event_cleanup_policy).await {
+                if let Err(err) = db_for_cleanup
+                    .cleanup_task_events(event_cleanup_policy)
+                    .await
+                {
                     warn!(error = %err, "task events cleanup failed");
                 }
             }
@@ -1059,7 +1084,9 @@ pub async fn run_server(
         .with_context(|| format!("invalid bind address: {host}:{port}"))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("web server listening on http://{}", addr);
-    axum::serve(listener, app).await.context("web server failed")?;
+    axum::serve(listener, app)
+        .await
+        .context("web server failed")?;
     Ok(())
 }
 
@@ -1223,7 +1250,9 @@ async fn api_list_events(
     Ok(Json(state.db.list_task_events(query).await?))
 }
 
-async fn api_dashboard(State(state): State<Arc<AppState>>) -> Result<Json<DashboardResponse>, ApiError> {
+async fn api_dashboard(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DashboardResponse>, ApiError> {
     let running_tasks = state.running_tasks.lock().await.len();
     let (today_bytes, today_runs) = state.db.dashboard_from_runs().await?;
     let (cpu_usage_percent, memory_used_bytes, memory_total_bytes) = {
@@ -1279,7 +1308,12 @@ async fn sync_task_schedule(state: Arc<AppState>, task: &TaskRecord) -> Result<(
     if !task.enabled {
         return Ok(());
     }
-    let cron_expr = match task.cron_expr.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) {
+    let cron_expr = match task
+        .cron_expr
+        .as_ref()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
         Some(v) => v.to_string(),
         None => return Ok(()),
     };
@@ -1294,7 +1328,12 @@ async fn sync_task_schedule(state: Arc<AppState>, task: &TaskRecord) -> Result<(
             }
         })
     })
-    .with_context(|| format!("invalid cron expression for task {}: {}", task.id, cron_expr))?;
+    .with_context(|| {
+        format!(
+            "invalid cron expression for task {}: {}",
+            task.id, cron_expr
+        )
+    })?;
     let job_id = job.guid();
     state
         .scheduler
@@ -1402,7 +1441,8 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
             persist_task_event(&event_tx, task_id, Some(run_id_for_event), uploaded_event);
             let now_ms = now_unix_millis();
             let last_emit = last_progress_emit_ms_ref.load(Ordering::Relaxed);
-            let should_emit = completed_bytes >= total_bytes || now_ms.saturating_sub(last_emit) >= 250;
+            let should_emit =
+                completed_bytes >= total_bytes || now_ms.saturating_sub(last_emit) >= 250;
             if !should_emit {
                 return;
             }
@@ -1542,7 +1582,8 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
             ignore_existing: task.ignore_existing,
             include: task.include.clone(),
             exclude: task.exclude.clone(),
-            bandwidth_limit: crate::engine::parse_bandwidth_limit(task.bandwidth_limit.as_deref())?,
+            bandwidth_limit: parse_bandwidth_limit(task.bandwidth_limit.as_deref())?,
+            stream_chunk_size: parse_stream_chunk_size(Some(task.chunk_size.as_str()))?,
         };
         run_transfer_with_reporter(
             mode,
@@ -1578,7 +1619,10 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                     None,
                 )
                 .await?;
-            state.db.insert_run_errors(run_id, error_records_vec).await?;
+            state
+                .db
+                .insert_run_errors(run_id, error_records_vec)
+                .await?;
             let event = json!({
                 "event": "task_completed",
                 "task_id": task.id,
@@ -1604,7 +1648,10 @@ async fn execute_task(state: Arc<AppState>, task: TaskRecord, trigger: &'static 
                     Some(err.to_string()),
                 )
                 .await?;
-            state.db.insert_run_errors(run_id, error_records_vec).await?;
+            state
+                .db
+                .insert_run_errors(run_id, error_records_vec)
+                .await?;
             let event = json!({
                 "event": "task_completed",
                 "task_id": task.id,
@@ -1639,6 +1686,7 @@ fn normalize_task_request(req: &mut CreateTaskRequest) -> Result<(), ApiError> {
     req.source = req.source.trim().to_string();
     req.destination = req.destination.trim().to_string();
     req.mode = req.mode.trim().to_ascii_lowercase();
+    req.chunk_size = req.chunk_size.trim().to_string();
     if req.name.is_empty() {
         return Err(ApiError::bad_request("name is required"));
     }
@@ -1652,6 +1700,11 @@ fn normalize_task_request(req: &mut CreateTaskRequest) -> Result<(), ApiError> {
     if req.checkers == 0 {
         req.checkers = 1;
     }
+    if req.chunk_size.is_empty() {
+        req.chunk_size = default_chunk_size();
+    }
+    parse_stream_chunk_size(Some(req.chunk_size.as_str()))
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
     if let Some(expr) = req.cron_expr.as_mut() {
         let t = expr.trim().to_string();
         *expr = t;
@@ -1664,6 +1717,7 @@ fn normalize_task_update_request(req: &mut UpdateTaskRequest) -> Result<(), ApiE
     req.source = req.source.trim().to_string();
     req.destination = req.destination.trim().to_string();
     req.mode = req.mode.trim().to_ascii_lowercase();
+    req.chunk_size = req.chunk_size.trim().to_string();
     if req.name.is_empty() {
         return Err(ApiError::bad_request("name is required"));
     }
@@ -1677,6 +1731,11 @@ fn normalize_task_update_request(req: &mut UpdateTaskRequest) -> Result<(), ApiE
     if req.checkers == 0 {
         req.checkers = 1;
     }
+    if req.chunk_size.is_empty() {
+        req.chunk_size = default_chunk_size();
+    }
+    parse_stream_chunk_size(Some(req.chunk_size.as_str()))
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
     if let Some(expr) = req.cron_expr.as_mut() {
         let t = expr.trim().to_string();
         *expr = t;
@@ -1723,7 +1782,12 @@ fn normalize_update_remote_request(req: &mut UpdateRemoteRequest) -> Result<(), 
 fn remote_record_to_config(remote: &RemoteRecord) -> Result<RemoteConfig> {
     let mut raw = match &remote.config_json {
         serde_json::Value::Object(map) => map.clone(),
-        _ => return Err(anyhow!("remote `{}` config_json must be object", remote.name)),
+        _ => {
+            return Err(anyhow!(
+                "remote `{}` config_json must be object",
+                remote.name
+            ))
+        }
     };
     raw.insert(
         "type".to_string(),
@@ -1805,7 +1869,11 @@ async fn persist_task_event_batch_with_retry(db: &Db, batch: Vec<TaskEventWrite>
 }
 
 fn bool_to_i64(value: bool) -> i64 {
-    if value { 1 } else { 0 }
+    if value {
+        1
+    } else {
+        0
+    }
 }
 
 fn i64_to_bool(value: i64) -> bool {
@@ -1822,6 +1890,26 @@ fn default_transfers() -> u32 {
 
 fn default_checkers() -> u32 {
     8
+}
+
+fn default_chunk_size() -> String {
+    "8MB".to_string()
+}
+
+fn ensure_tasks_chunk_size_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(tasks)")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == "chunk_size" {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        "ALTER TABLE tasks ADD COLUMN chunk_size TEXT NOT NULL DEFAULT '8MB'",
+        [],
+    )?;
+    Ok(())
 }
 
 fn now_unix_millis() -> u64 {
