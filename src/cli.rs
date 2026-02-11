@@ -79,6 +79,9 @@ pub struct ServerArgs {
     #[arg(long, default_value = "flowsync.db")]
     pub db: String,
 
+    #[arg(long, env = "FLOWSYNC_ADMIN_PASSWORD")]
+    pub admin_password: Option<String>,
+
     #[arg(long, default_value_t = 7)]
     pub event_retention_days: u32,
 

@@ -200,9 +200,30 @@ pub(super) async fn ws_client(mut socket: WebSocket, state: Arc<AppState>) {
     }
 }
 
-pub(super) async fn index_handler() -> Html<String> {
+pub(super) async fn index_handler(State(state): State<Arc<AppState>>) -> Html<String> {
     match WebAssets::get("index.html") {
-        Some(content) => Html(String::from_utf8_lossy(content.data.as_ref()).to_string()),
+        Some(content) => {
+            let mut html = String::from_utf8_lossy(content.data.as_ref()).to_string();
+            if let Some(password) = state
+                .web_admin_password
+                .as_ref()
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+            {
+                let password_json = serde_json::to_string(&password)
+                    .unwrap_or_else(|_| "\"\"".to_string())
+                    .replace("</", "<\\/");
+                let injected = format!(
+                    "<script>window.__FLOWSYNC_UI_CONFIG__=Object.assign({{}},window.__FLOWSYNC_UI_CONFIG__||{{}},{{adminPassword:{password_json}}});</script>\n"
+                );
+                if let Some(pos) = html.find("<script>") {
+                    html.insert_str(pos, injected.as_str());
+                } else {
+                    html.push_str(injected.as_str());
+                }
+            }
+            Html(html)
+        }
         None => Html("<h1>index.html not found</h1>".to_string()),
     }
 }

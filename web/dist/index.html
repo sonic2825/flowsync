@@ -272,6 +272,47 @@
       margin-bottom: 12px;
     }
     .modal-open { overflow: hidden; }
+    .guard-note {
+      margin-top: 8px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #fff6e8;
+      border: 1px solid #f5d0a0;
+      color: #7a4b00;
+      font-size: 13px;
+    }
+    .guard-note.error {
+      background: #ffecec;
+      border-color: #f7b7b7;
+      color: #8f1f1f;
+    }
+    .auth-modal {
+      width: min(520px, 100%);
+    }
+    .auth-help {
+      margin: 6px 0 10px;
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    .auth-error {
+      min-height: 20px;
+      margin-top: 8px;
+      color: #b42318;
+      font-size: 13px;
+    }
+    .auth-cooldown {
+      min-height: 18px;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .auth-actions {
+      margin-top: 12px;
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+    }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     @keyframes popIn { from { transform: translateY(6px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
   </style>
@@ -281,6 +322,7 @@
     <div class="headline">
       <h1>FlowSync Web 管理后台</h1>
       <div class="subtle">任务管理、Remotes 配置与运行审计</div>
+      <div class="guard-note" id="adminGuardStatus">只读访问已开启。查看敏感配置及高危写操作需要管理员安全密码。</div>
     </div>
 
     <div class="section">
@@ -301,7 +343,7 @@
       <div class="table-wrap">
         <table>
           <thead>
-            <tr><th>名称</th><th>类型</th><th>配置</th><th>操作</th></tr>
+            <tr><th>名称</th><th>类型</th><th>关键信息</th><th>操作</th></tr>
           </thead>
           <tbody id="remotesBody"></tbody>
         </table>
@@ -510,6 +552,22 @@
     </div>
   </div>
 
+  <div id="adminAuthBackdrop" class="modal-backdrop hidden">
+    <div class="modal card auth-modal" role="dialog" aria-modal="true" aria-labelledby="adminAuthTitle">
+      <div class="modal-head">
+        <h2 id="adminAuthTitle">管理员安全验证</h2>
+      </div>
+      <div class="auth-help" id="adminAuthPrompt">执行此操作前，请输入管理员安全密码。</div>
+      <input id="adminAuthInput" type="password" placeholder="管理员安全密码" autocomplete="off" />
+      <div class="auth-error" id="adminAuthError"></div>
+      <div class="auth-cooldown" id="adminAuthCooldown"></div>
+      <div class="auth-actions">
+        <button class="btn secondary" id="adminAuthCancelBtn" type="button">取消</button>
+        <button class="btn danger" id="adminAuthConfirmBtn" type="button">确认执行</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const byId = (id) => document.getElementById(id);
     const fmtBytes = (n) => {
@@ -525,16 +583,41 @@
     };
     const eventBox = byId('events');
     const taskEventHint = byId('taskEventHint');
+    const adminGuardStatus = byId('adminGuardStatus');
     const remoteModalBackdrop = byId('remoteModalBackdrop');
     const taskModalBackdrop = byId('taskModalBackdrop');
+    const adminAuthBackdrop = byId('adminAuthBackdrop');
     const taskNameFilter = byId('taskNameFilter');
     const taskModeFilter = byId('taskModeFilter');
     const taskStatusFilter = byId('taskStatusFilter');
     const runsTaskIdFilter = byId('runsTaskIdFilter');
     const runsStatusFilter = byId('runsStatusFilter');
     const eventsKeyword = byId('eventsKeyword');
+    const adminAuthInput = byId('adminAuthInput');
+    const adminAuthPrompt = byId('adminAuthPrompt');
+    const adminAuthError = byId('adminAuthError');
+    const adminAuthCooldown = byId('adminAuthCooldown');
+    const adminAuthCancelBtn = byId('adminAuthCancelBtn');
+    const adminAuthConfirmBtn = byId('adminAuthConfirmBtn');
     const taskActionMenu = byId('taskActionMenu');
     const remoteActionMenu = byId('remoteActionMenu');
+    const ADMIN_AUTH_TTL_MS = 15 * 60 * 1000;
+    const ADMIN_AUTH_COOLDOWN_MS = 3 * 1000;
+    const adminPassword = (() => {
+      const fromWindow = window.__FLOWSYNC_UI_CONFIG__?.adminPassword;
+      if (typeof fromWindow === 'string' && fromWindow.trim()) return fromWindow;
+      try {
+        const fromLocalStorage = localStorage.getItem('flowsync_admin_password');
+        if (typeof fromLocalStorage === 'string' && fromLocalStorage.trim()) return fromLocalStorage;
+      } catch (_) {
+      }
+      return '';
+    })();
+    let adminAuthorizedUntil = 0;
+    let adminAuthFailUntil = 0;
+    let adminAuthResolver = null;
+    let adminAuthPromise = null;
+    let adminCooldownTimer = null;
     let selectedTaskId = null;
     let selectedTaskName = '';
     let activeActionTaskId = null;
@@ -547,6 +630,75 @@
     let loadingTaskEventsFor = null;
     let taskEventLines = [];
     let eventsSearchTimer = null;
+
+    function setGuardStatus(message, isError = false) {
+      if (!adminGuardStatus) return;
+      adminGuardStatus.textContent = message;
+      adminGuardStatus.classList.toggle('error', Boolean(isError));
+    }
+
+    function updateAdminCooldownHint() {
+      const remainMs = Math.max(0, adminAuthFailUntil - Date.now());
+      const remainSec = Math.ceil(remainMs / 1000);
+      adminAuthConfirmBtn.disabled = remainMs > 0;
+      adminAuthCooldown.textContent = remainMs > 0 ? `冷却中，请 ${remainSec} 秒后再试。` : '';
+      if (remainMs === 0 && adminCooldownTimer) {
+        clearInterval(adminCooldownTimer);
+        adminCooldownTimer = null;
+      }
+    }
+
+    function closeAdminAuthModal(result) {
+      adminAuthBackdrop.classList.add('hidden');
+      if (adminCooldownTimer) {
+        clearInterval(adminCooldownTimer);
+        adminCooldownTimer = null;
+      }
+      const resolver = adminAuthResolver;
+      adminAuthResolver = null;
+      adminAuthPromise = null;
+      if (resolver) resolver(result);
+    }
+
+    function openAdminAuthModal(actionLabel) {
+      if (adminAuthPromise) return adminAuthPromise;
+      if (!adminPassword) {
+        alert('未配置管理员安全密码，已禁止高危操作。请联系管理员配置 window.__FLOWSYNC_UI_CONFIG__.adminPassword 或 localStorage: flowsync_admin_password');
+        setGuardStatus('当前未配置管理员安全密码，高危写操作已禁用。', true);
+        return Promise.resolve(false);
+      }
+      adminAuthPrompt.textContent = `即将执行：${actionLabel}。请输入管理员安全密码继续。`;
+      adminAuthError.textContent = '';
+      adminAuthCooldown.textContent = '';
+      adminAuthInput.value = '';
+      adminAuthBackdrop.classList.remove('hidden');
+      setTimeout(() => adminAuthInput.focus(), 0);
+      updateAdminCooldownHint();
+      if (!adminCooldownTimer) {
+        adminCooldownTimer = setInterval(updateAdminCooldownHint, 250);
+      }
+      adminAuthPromise = new Promise((resolve) => {
+        adminAuthResolver = resolve;
+      });
+      return adminAuthPromise;
+    }
+
+    async function guardedAction(actionLabel, actionFn) {
+      const ok = await ensureAdminVerified(actionLabel);
+      if (!ok) return false;
+      await actionFn();
+      const remainMin = Math.max(0, Math.ceil((adminAuthorizedUntil - Date.now()) / 60000));
+      setGuardStatus(`管理员验证有效（剩余约 ${remainMin} 分钟）。高危操作将继续受门禁控制。`);
+      return true;
+    }
+
+    async function ensureAdminVerified(actionLabel) {
+      if (Date.now() >= adminAuthorizedUntil) {
+        const ok = await openAdminAuthModal(actionLabel);
+        if (!ok) return false;
+      }
+      return true;
+    }
 
     function closeAllFilterPopovers() {
       document.querySelectorAll('.filter-popover.open').forEach((el) => el.classList.remove('open'));
@@ -799,12 +951,50 @@
       `;
     }
 
+    function summarizeRemoteConfig(remote) {
+      const cfg = remote?.config_json || {};
+      const type = String(remote?.type || '').toLowerCase();
+      const parts = [];
+      if (type === 's3') {
+        if (cfg.endpoint) parts.push(`endpoint: ${cfg.endpoint}`);
+        if (cfg.bucket) parts.push(`bucket: ${cfg.bucket}`);
+        if (cfg.region) parts.push(`region: ${cfg.region}`);
+        if (cfg.root) parts.push(`root: ${cfg.root}`);
+      } else if (type === 'fs') {
+        if (cfg.root) parts.push(`root: ${cfg.root}`);
+      } else if (type === 'sftp' || type === 'ftp') {
+        if (cfg.endpoint) parts.push(`endpoint: ${cfg.endpoint}`);
+        if (cfg.host) parts.push(`host: ${cfg.host}`);
+        if (cfg.port != null) parts.push(`port: ${cfg.port}`);
+        if (cfg.user) parts.push(`user: ${cfg.user}`);
+        if (cfg.root) parts.push(`root: ${cfg.root}`);
+      }
+      if (parts.length > 0) return parts.join(' | ');
+
+      const hidden = new Set([
+        'access_key',
+        'secret_key',
+        'session_token',
+        'password',
+        'passphrase',
+        'token',
+        'credential',
+        'credentials',
+      ]);
+      const generic = Object.entries(cfg)
+        .filter(([k, v]) => !hidden.has(String(k).toLowerCase()) && v !== null && v !== '')
+        .slice(0, 3)
+        .map(([k, v]) => `${k}: ${String(v)}`);
+      if (generic.length > 0) return generic.join(' | ');
+      return '未展示敏感配置，点击“操作 ▾ → 编辑”查看全部';
+    }
+
     function renderRemotes(remotes) {
       byId('remotesBody').innerHTML = remotes.map(r => `
         <tr>
           <td>${r.name}</td>
           <td>${r.type}</td>
-          <td><pre style="margin:0;white-space:pre-wrap;max-width:700px;">${JSON.stringify(r.config_json || {}, null, 2)}</pre></td>
+          <td style="color: var(--muted);">${summarizeRemoteConfig(r)}</td>
           <td class="actions-cell">
             <button class="btn secondary action-trigger" onclick='toggleRemoteActionMenu(${JSON.stringify(r.name)}, event)'>操作 ▾</button>
           </td>
@@ -885,7 +1075,6 @@
       await refreshTasks();
     }
     async function deleteTask(id) {
-      if (!confirm(`确认删除任务 ${id} ?`)) return;
       await api(`/api/tasks/${id}`, { method: 'DELETE' });
       if (selectedTaskId === id) {
         selectedTaskId = null;
@@ -898,7 +1087,6 @@
       await refreshRuns();
     }
     async function deleteRemote(name) {
-      if (!confirm(`确认删除 remote ${name} ?`)) return;
       await api(`/api/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
       await refreshRemotes();
     }
@@ -1026,7 +1214,7 @@
       if (activeActionTaskId == null) return;
       const id = activeActionTaskId;
       closeAllTaskActionMenus();
-      await runTask(id);
+      await guardedAction(`立即运行任务 #${id}`, async () => runTask(id));
     });
     byId('taskActionEdit').addEventListener('click', () => {
       if (activeActionTaskId == null) return;
@@ -1049,33 +1237,37 @@
       closeAllTaskActionMenus();
       if (!task) return;
       if (task.enabled) {
-        await pauseTask(id);
+        await guardedAction(`暂停任务 #${id}`, async () => pauseTask(id));
       } else {
-        await resumeTask(id);
+        await guardedAction(`恢复任务 #${id}`, async () => resumeTask(id));
       }
     });
     byId('taskActionDelete').addEventListener('click', async () => {
       if (activeActionTaskId == null) return;
       const id = activeActionTaskId;
       closeAllTaskActionMenus();
-      await deleteTask(id);
+      await guardedAction(`删除任务 #${id}`, async () => deleteTask(id));
     });
-    byId('remoteActionEdit').addEventListener('click', () => {
+    byId('remoteActionEdit').addEventListener('click', async () => {
       if (activeActionRemoteName == null) return;
       const remote = latestRemotes.find((r) => r.name === activeActionRemoteName);
       closeAllRemoteActionMenus();
       if (!remote) return;
+      const ok = await ensureAdminVerified(`查看 remote ${remote.name} 的敏感配置`);
+      if (!ok) return;
       fillRemoteForm(encodeURIComponent(JSON.stringify({
         name: remote.name,
         type: remote.type,
         config_json: remote.config_json || {},
       })));
     });
-    byId('remoteActionDuplicate').addEventListener('click', () => {
+    byId('remoteActionDuplicate').addEventListener('click', async () => {
       if (activeActionRemoteName == null) return;
       const remote = latestRemotes.find((r) => r.name === activeActionRemoteName);
       closeAllRemoteActionMenus();
       if (!remote) return;
+      const ok = await ensureAdminVerified(`查看并复制 remote ${remote.name} 的敏感配置`);
+      if (!ok) return;
       duplicateRemote(encodeURIComponent(JSON.stringify({
         name: remote.name,
         type: remote.type,
@@ -1086,7 +1278,7 @@
       if (activeActionRemoteName == null) return;
       const name = activeActionRemoteName;
       closeAllRemoteActionMenus();
-      await deleteRemote(name);
+      await guardedAction(`删除 remote ${name}`, async () => deleteRemote(name));
     });
     byId('closeRemoteModalBtn').addEventListener('click', closeRemoteModal);
     remoteModalBackdrop.addEventListener('click', (e) => {
@@ -1118,23 +1310,25 @@
         alert(`config_json 不是合法 JSON: ${err}`);
         return;
       }
-      try {
-        await api(`/api/remotes/${encodeURIComponent(name)}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ type, config_json: configJson }),
-        });
-      } catch (_) {
-        await api('/api/remotes', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, type, config_json: configJson }),
-        });
-      }
-      await refreshRemotes();
-      byId('source').placeholder = `${name}:/path/from`;
-      byId('destination').placeholder = `${name}:/path/to`;
-      closeRemoteModal();
+      await guardedAction(`保存 remote ${name}`, async () => {
+        try {
+          await api(`/api/remotes/${encodeURIComponent(name)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type, config_json: configJson }),
+          });
+        } catch (_) {
+          await api('/api/remotes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, type, config_json: configJson }),
+          });
+        }
+        await refreshRemotes();
+        byId('source').placeholder = `${name}:/path/from`;
+        byId('destination').placeholder = `${name}:/path/to`;
+        closeRemoteModal();
+      });
     });
 
     byId('taskForm').addEventListener('submit', async (e) => {
@@ -1156,23 +1350,61 @@
         bandwidth_limit: byId('bandwidth').value || null,
         chunk_size: byId('chunkSize').value || '8MB'
       };
-      if (editingTaskId) {
-        await api(`/api/tasks/${editingTaskId}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
-      } else {
-        await api('/api/tasks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+      const actionLabel = editingTaskId ? `修改任务 #${editingTaskId}` : `创建任务 ${payload.name || ''}`.trim();
+      await guardedAction(actionLabel, async () => {
+        if (editingTaskId) {
+          await api(`/api/tasks/${editingTaskId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        } else {
+          await api('/api/tasks', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+        }
+        resetTaskFormToCreateMode();
+        closeTaskModal();
+        await refreshTasks();
+        await refreshRuns();
+      });
+    });
+
+    adminAuthCancelBtn.addEventListener('click', () => closeAdminAuthModal(false));
+    adminAuthBackdrop.addEventListener('click', (e) => {
+      if (e.target === adminAuthBackdrop) closeAdminAuthModal(false);
+    });
+    adminAuthInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeAdminAuthModal(false);
       }
-      resetTaskFormToCreateMode();
-      closeTaskModal();
-      await refreshTasks();
-      await refreshRuns();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        adminAuthConfirmBtn.click();
+      }
+    });
+    adminAuthConfirmBtn.addEventListener('click', () => {
+      if (!adminPassword) {
+        setGuardStatus('当前未配置管理员安全密码，敏感配置查看与高危写操作已禁用。', true);
+        adminAuthError.textContent = '未配置管理员安全密码。';
+        return;
+      }
+      if (Date.now() < adminAuthFailUntil) {
+        updateAdminCooldownHint();
+        return;
+      }
+      if ((adminAuthInput.value || '') !== adminPassword) {
+        adminAuthFailUntil = Date.now() + ADMIN_AUTH_COOLDOWN_MS;
+        adminAuthError.textContent = '密码错误，请重试。';
+        updateAdminCooldownHint();
+        adminAuthInput.select();
+        return;
+      }
+      adminAuthorizedUntil = Date.now() + ADMIN_AUTH_TTL_MS;
+      closeAdminAuthModal(true);
     });
 
     taskNameFilter.addEventListener('input', () => renderTasks(getFilteredTasks()));
@@ -1246,6 +1478,9 @@
     }
 
     async function boot() {
+      if (!adminPassword) {
+        setGuardStatus('当前未配置管理员安全密码，敏感配置查看与高危写操作已禁用。', true);
+      }
       await refreshRemotes();
       await refreshTasks();
       await refreshRuns();

@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
                 max_rows: args.event_max_rows,
                 interval_secs: args.event_cleanup_interval_secs,
             };
-            run_server(args.host, args.port, args.db, policy).await
+            run_server(args.host, args.port, args.db, args.admin_password, policy).await
         }
     }
 }

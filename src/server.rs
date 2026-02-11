@@ -77,6 +77,7 @@ struct AppState {
     scheduler: JobScheduler,
     scheduled_jobs: Arc<Mutex<HashMap<i64, Uuid>>>,
     running_tasks: Arc<Mutex<HashSet<i64>>>,
+    web_admin_password: Option<String>,
     ws_tx: broadcast::Sender<String>,
     event_tx: Sender<TaskEventWrite>,
     system: Arc<Mutex<System>>,
@@ -364,6 +365,7 @@ pub async fn run_server(
     host: String,
     port: u16,
     db_path: String,
+    admin_password: Option<String>,
     event_cleanup_policy: EventCleanupPolicy,
 ) -> Result<()> {
     let db = Db::new(PathBuf::from(db_path));
@@ -381,6 +383,7 @@ pub async fn run_server(
         scheduler,
         scheduled_jobs: Arc::new(Mutex::new(HashMap::new())),
         running_tasks: Arc::new(Mutex::new(HashSet::new())),
+        web_admin_password: admin_password,
         ws_tx,
         event_tx,
         system: Arc::new(Mutex::new(System::new_with_specifics(

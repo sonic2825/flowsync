@@ -162,6 +162,55 @@ cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
 浏览器访问：
 - `http://127.0.0.1:3030`
 
+### 管理员安全密码门禁（Web）
+
+当前 Web 后台支持“匿名只读 + 高危操作口令验证”：
+- 普通用户无需登录即可查看页面
+- 新建/修改/暂停/删除/立即运行 等写操作，需先输入管理员安全密码
+- 验证通过后，默认 `15` 分钟内可继续执行高危操作（前端会话内）
+
+推荐：在启动服务时直接配置管理员密码：
+
+```bash
+cargo run -- server \
+  --host 127.0.0.1 \
+  --port 3030 \
+  --db flowsync.db \
+  --admin-password 'replace-with-a-strong-password'
+```
+
+也可用环境变量（避免密码出现在命令历史）：
+
+```bash
+FLOWSYNC_ADMIN_PASSWORD='replace-with-a-strong-password' \
+cargo run -- server --host 127.0.0.1 --port 3030 --db flowsync.db
+```
+
+密码配置方式（优先级从高到低）：
+1. 启动参数 `--admin-password`（或环境变量 `FLOWSYNC_ADMIN_PASSWORD`）
+2. `window.__FLOWSYNC_UI_CONFIG__.adminPassword`
+3. `localStorage['flowsync_admin_password']`（仅建议本地调试）
+
+示例（方式 1，推荐）：
+
+```html
+<script>
+  window.__FLOWSYNC_UI_CONFIG__ = {
+    adminPassword: "replace-with-a-strong-password"
+  };
+</script>
+```
+
+示例（方式 2，本地调试）：
+
+```js
+localStorage.setItem("flowsync_admin_password", "replace-with-a-strong-password");
+```
+
+注意：
+- 若未配置密码，Web 页面会阻止所有高危写操作。
+- 该门禁目前是前端校验，只能防止页面误操作，不能阻止绕过页面直接调用 `/api/*` 写接口。
+
 事件清理参数（可选）：
 
 ```bash
