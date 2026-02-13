@@ -26,6 +26,43 @@
 cargo build
 ```
 
+## Docker 运行
+
+1) 构建镜像：
+
+```bash
+docker build -t flowsync:latest .
+```
+
+2) 启动 Web 服务（推荐挂载数据目录，持久化 DB）：
+
+```bash
+docker run --rm -p 3030:3030 \
+  -v $(pwd)/data:/data \
+  flowsync:latest
+```
+
+默认启动命令等价于：
+
+```bash
+flowsync server --host 0.0.0.0 --port 3030 --db /data/flowsync.db
+```
+
+3) 可选：挂载配置文件并指定 `FLOWSYNC_CONFIG`：
+
+```bash
+docker run --rm -p 3030:3030 \
+  -v $(pwd)/data:/data \
+  -v $(pwd)/config.toml:/app/config.toml:ro \
+  -e FLOWSYNC_CONFIG=/app/config.toml \
+  flowsync:latest
+```
+
+说明：
+- `config.toml` 不存在时，程序会使用空配置启动，不会因缺文件报错。
+- 你可以直接在 Web 页面添加 remotes；这些 remotes 会写入 `--db` 指向的 SQLite 数据库。
+- 若不挂载 `/data`，容器重建后通过 Web 添加的 remotes/tasks/runs 都会丢失。
+
 ## 快速开始（CLI）
 
 1) 初始化配置（交互式）：
