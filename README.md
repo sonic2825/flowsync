@@ -1,6 +1,6 @@
 # FlowSync
 
-基于 Rust + OpenDAL 的多后端文件复制/同步工具，提供：
+FlowSync 是一个基于 Rust + OpenDAL 的数据中转平台，用于在多种存储后端之间进行可视化、可调度、可审计的数据复制与同步，提供：
 - CLI：`copy` / `sync` / `move` / `ls` / `config init`
 - Web 管理端：任务管理、调度执行、运行历史、实时事件
 
