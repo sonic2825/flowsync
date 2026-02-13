@@ -58,10 +58,51 @@ docker run --rm -p 3030:3030 \
   flowsync:latest
 ```
 
+4) 可选：为 Web 写操作配置管理员密码（推荐用环境变量）：
+
+```bash
+docker run --rm -p 3030:3030 \
+  -v $(pwd)/data:/data \
+  -e FLOWSYNC_ADMIN_PASSWORD='replace-with-a-strong-password' \
+  flowsync:latest
+```
+
 说明：
 - `config.toml` 不存在时，程序会使用空配置启动，不会因缺文件报错。
 - 你可以直接在 Web 页面添加 remotes；这些 remotes 会写入 `--db` 指向的 SQLite 数据库。
 - 若不挂载 `/data`，容器重建后通过 Web 添加的 remotes/tasks/runs 都会丢失。
+
+### 使用 Docker Compose 持续后台运行
+
+仓库根目录已提供 `docker-compose.yml`，默认：
+- 映射端口 `3030:3030`
+- 挂载 `./data:/data` 持久化数据库
+- 设置 `restart: unless-stopped` 保持后台持续运行
+
+启动（后台）：
+
+```bash
+docker compose up -d
+```
+
+查看日志：
+
+```bash
+docker compose logs -f
+```
+
+停止：
+
+```bash
+docker compose down
+```
+
+可选：先设置管理员密码环境变量再启动：
+
+```bash
+export FLOWSYNC_ADMIN_PASSWORD='replace-with-a-strong-password'
+docker compose up -d
+```
 
 ## 快速开始（CLI）
 

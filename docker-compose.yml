@@ -1,0 +1,14 @@
+services:
+  flowsync:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: flowsync:latest
+    container_name: flowsync
+    restart: unless-stopped
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./data:/data
+    environment:
+      FLOWSYNC_ADMIN_PASSWORD: ${FLOWSYNC_ADMIN_PASSWORD:-}
